@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 
 	"github.com/xssnick/tonutils-go/ton/payments"
 )
@@ -25,7 +24,7 @@ func (b *WSBridge) handlePaymentGetChannelState(client *wsClient, req *WSRequest
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Payment.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)

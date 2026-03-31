@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
-	"time"
 
 	"github.com/xssnick/tonutils-go/ton/nft"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -25,7 +24,7 @@ func (b *WSBridge) handleNFTGetData(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.NFT.Timeout)
 	defer cancel()
 
 	nftClient := nft.NewItemClient(b.api, addr)
@@ -86,7 +85,7 @@ func (b *WSBridge) handleNFTGetCollectionData(client *wsClient, req *WSRequest) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.NFT.Timeout)
 	defer cancel()
 
 	collClient := nft.NewCollectionClient(b.api, addr)
@@ -135,7 +134,7 @@ func (b *WSBridge) handleNFTGetAddressByIndex(client *wsClient, req *WSRequest) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.NFT.Timeout)
 	defer cancel()
 
 	collClient := nft.NewCollectionClient(b.api, collAddr)
@@ -165,7 +164,7 @@ func (b *WSBridge) handleNFTGetRoyaltyParams(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.NFT.Timeout)
 	defer cancel()
 
 	collClient := nft.NewCollectionClient(b.api, collAddr)
@@ -233,7 +232,7 @@ func (b *WSBridge) handleNFTGetContent(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.NFT.Timeout)
 	defer cancel()
 
 	collClient := nft.NewCollectionClient(b.api, collAddr)

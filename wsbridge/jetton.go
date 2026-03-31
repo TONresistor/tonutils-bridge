@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
-	"time"
 
 	"github.com/xssnick/tonutils-go/ton/jetton"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -25,7 +24,7 @@ func (b *WSBridge) handleJettonGetData(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Jetton.Timeout)
 	defer cancel()
 
 	jClient := jetton.NewJettonMasterClient(b.api, addr)
@@ -75,7 +74,7 @@ func (b *WSBridge) handleJettonGetWalletAddress(client *wsClient, req *WSRequest
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Jetton.Timeout)
 	defer cancel()
 
 	jClient := jetton.NewJettonMasterClient(b.api, masterAddr)
@@ -105,7 +104,7 @@ func (b *WSBridge) handleJettonGetBalance(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Jetton.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)

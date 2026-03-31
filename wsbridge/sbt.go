@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
-	"time"
 
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
@@ -24,7 +23,7 @@ func (b *WSBridge) handleSBTGetAuthorityAddress(client *wsClient, req *WSRequest
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.SBT.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -79,7 +78,7 @@ func (b *WSBridge) handleSBTGetRevokedTime(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.SBT.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)

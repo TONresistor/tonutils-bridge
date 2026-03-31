@@ -76,18 +76,18 @@ func (b *WSBridge) handleSubscribeTrace(client *wsClient, req *WSRequest) {
 
 	maxDepth := params.MaxDepth
 	if maxDepth <= 0 {
-		maxDepth = 3
+		maxDepth = b.cfg.Namespaces.SubscribeTrace.DefaultDepth
 	}
-	if maxDepth > 10 {
-		maxDepth = 10
+	if maxDepth > b.cfg.Namespaces.SubscribeTrace.MaxDepth {
+		maxDepth = b.cfg.Namespaces.SubscribeTrace.MaxDepth
 	}
 
 	msgTimeout := time.Duration(params.MsgTimeoutSec) * time.Second
 	if msgTimeout <= 0 {
-		msgTimeout = 10 * time.Second
+		msgTimeout = b.cfg.Namespaces.SubscribeTrace.DefaultMsgTimeout
 	}
-	if msgTimeout > 120*time.Second {
-		msgTimeout = 120 * time.Second
+	if msgTimeout > b.cfg.Namespaces.SubscribeTrace.MaxMsgTimeout {
+		msgTimeout = b.cfg.Namespaces.SubscribeTrace.MaxMsgTimeout
 	}
 
 	// Register subscription
@@ -167,7 +167,7 @@ func (b *WSBridge) traceCoordinator(ctx context.Context, client *wsClient, rootT
 	initialMsgs := extractInternalOutMsgs(rootTx, 1)
 
 	newMsgsCh := make(chan pendingMsg, 64)
-	sem := make(chan struct{}, 50) // max 50 concurrent resolvers
+	sem := make(chan struct{}, b.cfg.Namespaces.SubscribeTrace.MaxResolvers) // max concurrent resolvers
 
 	var wg sync.WaitGroup
 

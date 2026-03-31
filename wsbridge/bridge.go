@@ -24,20 +24,8 @@ import (
 )
 
 const (
-	writeWait  = 10 * time.Second   // time allowed to write a message
-	pongWait   = 60 * time.Second   // time allowed to read the next pong
-	pingPeriod = (pongWait * 9) / 10 // send pings at this interval (must be < pongWait)
-)
-
-const (
-	maxWSClients              = 100
-	maxWSMessageSize          = 1 << 20 // 1 MB
-	maxPeersPerClient         = 20
-	maxOverlaysPerClient      = 10
-	maxSubscriptionsPerClient = 50
 	maxPendingQueryTTL        = 30 * time.Second
 	pendingQuerySweepInterval = 10 * time.Second
-	maxInflightRequests       = 100
 )
 
 // RawMessage is a simple TL type for sending raw bytes over ADNL
@@ -102,6 +90,7 @@ type wsClient struct {
 
 // WSBridge exposes ADNL/DHT/Lite/DNS operations via WebSocket
 type WSBridge struct {
+	cfg      *BridgeConfig
 	dht      *dht.Client
 	api      ton.APIClientWrapped
 	dns      *dns.Client
@@ -132,8 +121,13 @@ type pendingQuery struct {
 }
 
 // NewWSBridge creates a new WebSocket-ADNL bridge
-func NewWSBridge(dhtClient *dht.Client, api ton.APIClientWrapped, dnsClient *dns.Client, gate *adnl.Gateway, key ed25519.PrivateKey) *WSBridge {
+func NewWSBridge(cfg *BridgeConfig, dhtClient *dht.Client, api ton.APIClientWrapped, dnsClient *dns.Client, gate *adnl.Gateway, key ed25519.PrivateKey) *WSBridge {
+	if cfg == nil {
+		cfg = DefaultBridgeConfig()
+	}
+
 	bridge := &WSBridge{
+		cfg:            cfg,
 		dht:            dhtClient,
 		api:            api,
 		dns:            dnsClient,
@@ -155,26 +149,33 @@ func NewWSBridge(dhtClient *dht.Client, api ton.APIClientWrapped, dnsClient *dns
 					return false
 				}
 				host := u.Hostname()
-				return host == "127.0.0.1" || host == "localhost" || host == "::1"
+				for _, allowed := range cfg.AllowedOrigins {
+					if allowed == "*" || host == allowed {
+						return true
+					}
+				}
+				return false
 			},
 		},
 	}
 
-	// Register inbound connection handler on the ADNL gateway
-	gate.SetConnectionHandler(func(peer adnl.Peer) error {
-		bridge.setupPeerHandlers(peer, nil)
+	if gate != nil {
+		// Register inbound connection handler on the ADNL gateway
+		gate.SetConnectionHandler(func(peer adnl.Peer) error {
+			bridge.setupPeerHandlers(peer, nil)
 
-		peerHex := hex.EncodeToString(peer.GetID())
-		bridge.activePeersMu.Lock()
-		bridge.activePeers[peerHex] = peer
-		bridge.activePeersMu.Unlock()
+			peerHex := hex.EncodeToString(peer.GetID())
+			bridge.activePeersMu.Lock()
+			bridge.activePeers[peerHex] = peer
+			bridge.activePeersMu.Unlock()
 
-		bridge.broadcastToClients("adnl.incomingConnection", map[string]any{
-			"peer_id":     base64.StdEncoding.EncodeToString(peer.GetID()),
-			"remote_addr": peer.RemoteAddr(),
+			bridge.broadcastToClients("adnl.incomingConnection", map[string]any{
+				"peer_id":     base64.StdEncoding.EncodeToString(peer.GetID()),
+				"remote_addr": peer.RemoteAddr(),
+			})
+			return nil
 		})
-		return nil
-	})
+	}
 
 	return bridge
 }
@@ -223,17 +224,26 @@ func (b *WSBridge) Start(ctx context.Context, addr string) error {
 }
 
 func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
+	// API key check
+	if b.cfg.APIKey != "" {
+		key := r.URL.Query().Get("api_key")
+		if key != b.cfg.APIKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	conn, err := b.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("ws upgrade failed")
 		return
 	}
-	conn.SetReadLimit(maxWSMessageSize)
+	conn.SetReadLimit(b.cfg.MaxMessageSize)
 
 	connCtx, connCancel := context.WithCancel(r.Context())
 	defer conn.Close()
 
-	client := &wsClient{conn: conn, ctx: connCtx, subscriptions: make(map[string]context.CancelFunc), inflightSem: make(chan struct{}, maxInflightRequests)}
+	client := &wsClient{conn: conn, ctx: connCtx, subscriptions: make(map[string]context.CancelFunc), inflightSem: make(chan struct{}, b.cfg.MaxInflight)}
 
 	// Serialize pong writes through the same mutex to prevent concurrent WriteControl/WriteMessage
 	conn.SetPingHandler(func(msg string) error {
@@ -243,14 +253,14 @@ func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Server-side read deadline + pong handler: detect dead connections.
-	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetReadDeadline(time.Now().Add(b.cfg.PongDeadline))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetReadDeadline(time.Now().Add(b.cfg.PongDeadline))
 		return nil
 	})
 
 	b.mu.Lock()
-	if len(b.clients) >= maxWSClients {
+	if len(b.clients) >= b.cfg.MaxClients {
 		b.mu.Unlock()
 		connCancel()
 		conn.WriteMessage(websocket.CloseMessage,
@@ -305,7 +315,7 @@ func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
 	client.wg.Add(1)
 	go func() {
 		defer client.wg.Done()
-		ticker := time.NewTicker(pingPeriod)
+		ticker := time.NewTicker(b.cfg.PingPeriod)
 		defer ticker.Stop()
 		for {
 			select {
@@ -313,7 +323,7 @@ func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-ticker.C:
 				client.mu.Lock()
-				conn.SetWriteDeadline(time.Now().Add(writeWait))
+				conn.SetWriteDeadline(time.Now().Add(b.cfg.WriteTimeout))
 				err := conn.WriteMessage(websocket.PingMessage, nil)
 				conn.SetWriteDeadline(time.Time{}) // clear deadline
 				client.mu.Unlock()
@@ -359,6 +369,12 @@ func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *WSBridge) handleRequest(client *wsClient, req *WSRequest) {
+	// Check if the namespace is enabled
+	if !b.cfg.namespaceEnabled(req.Method) {
+		b.sendError(client, req.ID, fmt.Sprintf("unknown method: %s", req.Method), -32601)
+		return
+	}
+
 	switch req.Method {
 	case "dht.findAddresses":
 		b.handleFindAddresses(client, req)
@@ -514,7 +530,7 @@ func (b *WSBridge) broadcastToClients(event string, data any) {
 
 	for _, c := range clients {
 		c.mu.Lock()
-		c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+		c.conn.SetWriteDeadline(time.Now().Add(b.cfg.WriteTimeout))
 		if err := c.conn.WriteMessage(websocket.TextMessage, jsonData); err != nil {
 			log.Debug().Err(err).Msg("ws broadcast write failed")
 		}
@@ -532,7 +548,7 @@ func (b *WSBridge) sendEvent(client *wsClient, event string, data any) bool {
 		return false
 	}
 	client.mu.Lock()
-	client.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	client.conn.SetWriteDeadline(time.Now().Add(b.cfg.WriteTimeout))
 	writeErr := client.conn.WriteMessage(websocket.TextMessage, jsonData)
 	client.conn.SetWriteDeadline(time.Time{})
 	client.mu.Unlock()
@@ -551,7 +567,7 @@ func (b *WSBridge) sendResult(client *wsClient, id string, result any) {
 		return
 	}
 	client.mu.Lock()
-	client.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	client.conn.SetWriteDeadline(time.Now().Add(b.cfg.WriteTimeout))
 	if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		log.Debug().Err(err).Msg("ws write failed")
 	}
@@ -573,7 +589,7 @@ func (b *WSBridge) sendError(client *wsClient, id string, errMsg string, code ..
 		return
 	}
 	client.mu.Lock()
-	client.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	client.conn.SetWriteDeadline(time.Now().Add(b.cfg.WriteTimeout))
 	if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		log.Debug().Err(err).Msg("ws write failed")
 	}

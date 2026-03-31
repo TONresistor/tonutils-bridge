@@ -19,7 +19,7 @@ import (
 )
 
 func (b *WSBridge) handleGetMasterchainInfo(client *wsClient, req *WSRequest) {
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -52,7 +52,7 @@ func (b *WSBridge) handleGetAccountState(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -125,7 +125,7 @@ func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -194,7 +194,7 @@ func (b *WSBridge) handleSendMessage(client *wsClient, req *WSRequest) {
 	}
 	msgHash := c.Hash()
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	var resp tl.Serializable
@@ -240,7 +240,7 @@ func (b *WSBridge) handleSendMessageWait(client *wsClient, req *WSRequest) {
 	}
 	msgHash := c.Hash()
 
-	ctx, cancel := context.WithTimeout(client.ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.SendWaitTimeout)
 	defer cancel()
 
 	var resp tl.Serializable
@@ -283,7 +283,7 @@ func (b *WSBridge) handleGetTransactions(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	var startLT uint64
@@ -345,7 +345,7 @@ func (b *WSBridge) handleGetTransactions(client *wsClient, req *WSRequest) {
 }
 
 func (b *WSBridge) handleGetTime(client *wsClient, req *WSRequest) {
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	t, err := b.api.GetTime(ctx)
@@ -377,7 +377,7 @@ func (b *WSBridge) handleLookupBlock(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.LookupBlock(ctx, params.Workchain, shard, params.Seqno)
@@ -418,7 +418,7 @@ func (b *WSBridge) handleGetBlockTransactions(client *wsClient, req *WSRequest) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.LookupBlock(ctx, params.Workchain, shard, params.Seqno)
@@ -453,7 +453,7 @@ func (b *WSBridge) handleGetBlockTransactions(client *wsClient, req *WSRequest) 
 }
 
 func (b *WSBridge) handleGetShards(client *wsClient, req *WSRequest) {
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	master, err := b.api.CurrentMasterchainInfo(ctx)
@@ -495,7 +495,7 @@ func (b *WSBridge) handleGetBlockchainConfig(client *wsClient, req *WSRequest) {
 		_ = json.Unmarshal(req.Params, &params)
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -555,7 +555,7 @@ func (b *WSBridge) handleGetTransaction(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -626,7 +626,7 @@ func (b *WSBridge) handleFindTxByInMsgHash(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	tx, err := b.api.FindLastTransactionByInMsgHash(ctx, addr, hashBytes)
@@ -660,7 +660,7 @@ func (b *WSBridge) handleFindTxByOutMsgHash(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	tx, err := b.api.FindLastTransactionByOutMsgHash(ctx, addr, hashBytes)
@@ -690,7 +690,7 @@ func (b *WSBridge) handleGetBlockData(client *wsClient, req *WSRequest) {
 	}
 	shard := int64(shardU)
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.LookupBlock(ctx, params.Workchain, shard, params.Seqno)
@@ -741,7 +741,7 @@ func (b *WSBridge) handleGetBlockHeader(client *wsClient, req *WSRequest) {
 	}
 	shard := int64(shardU)
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	block, err := b.api.LookupBlock(ctx, params.Workchain, shard, params.Seqno)
@@ -811,7 +811,7 @@ func (b *WSBridge) handleGetLibraries(client *wsClient, req *WSRequest) {
 		hashBytes[i] = decoded
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
 	cells, err := b.api.GetLibraries(ctx, hashBytes...)
@@ -884,7 +884,7 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 	msgHash := msgCell.Hash()
 
 	// Create a context with 180s timeout, cancellable by client disconnect
-	ctx, cancel := context.WithTimeout(client.ctx, 180*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.WatchTimeout)
 	defer cancel()
 
 	// Generate subscription ID for tracking

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
-	"time"
 
 	"github.com/xssnick/tonutils-go/ton/wallet"
 )
@@ -25,7 +24,7 @@ func (b *WSBridge) handleWalletGetSeqno(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Wallet.Timeout)
 	defer cancel()
 
 	block, err := b.api.CurrentMasterchainInfo(ctx)
@@ -68,7 +67,7 @@ func (b *WSBridge) handleWalletGetPublicKey(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Wallet.Timeout)
 	defer cancel()
 
 	pubKey, err := wallet.GetPublicKey(ctx, b.api, addr)

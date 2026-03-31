@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"math/big"
 	"strings"
-	"time"
 
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
@@ -24,7 +23,7 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.DNS.Timeout)
 	defer cancel()
 
 	domain, err := b.dns.Resolve(ctx, params.Domain)

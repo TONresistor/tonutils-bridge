@@ -124,8 +124,8 @@ func (b *WSBridge) handleADNLConnect(client *wsClient, req *WSRequest) {
 	client.peersMu.Lock()
 	peerCount := len(client.peers)
 	client.peersMu.Unlock()
-	if peerCount >= 20 {
-		b.sendError(client, req.ID, "max peers limit reached (20)", -32602)
+	if peerCount >= b.cfg.Namespaces.ADNL.MaxPeers {
+		b.sendError(client, req.ID, fmt.Sprintf("max peers limit reached (%d)", b.cfg.Namespaces.ADNL.MaxPeers), -32602)
 		return
 	}
 
@@ -151,7 +151,7 @@ func (b *WSBridge) handleADNLConnect(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "invalid IP address", -32602)
 		return
 	}
-	if isPrivateIP(ip) {
+	if b.cfg.Namespaces.ADNL.SSRFProtection && isPrivateIP(ip) {
 		b.sendError(client, req.ID, "private/loopback addresses not allowed", -32602)
 		return
 	}
@@ -194,8 +194,8 @@ func (b *WSBridge) handleADNLConnectByADNL(client *wsClient, req *WSRequest) {
 	client.peersMu.Lock()
 	peerCount := len(client.peers)
 	client.peersMu.Unlock()
-	if peerCount >= 20 {
-		b.sendError(client, req.ID, "max peers limit reached (20)", -32602)
+	if peerCount >= b.cfg.Namespaces.ADNL.MaxPeers {
+		b.sendError(client, req.ID, fmt.Sprintf("max peers limit reached (%d)", b.cfg.Namespaces.ADNL.MaxPeers), -32602)
 		return
 	}
 
@@ -205,7 +205,7 @@ func (b *WSBridge) handleADNLConnectByADNL(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.DHT.Timeout)
 	defer cancel()
 
 	addrs, pubKey, err := b.dht.FindAddresses(ctx, adnlID)
@@ -220,7 +220,7 @@ func (b *WSBridge) handleADNLConnectByADNL(client *wsClient, req *WSRequest) {
 	}
 
 	// C8: SSRF protection — reject private/loopback addresses resolved via DHT
-	if isPrivateIP(addrs.Addresses[0].IP) {
+	if b.cfg.Namespaces.ADNL.SSRFProtection && isPrivateIP(addrs.Addresses[0].IP) {
 		b.sendError(client, req.ID, "private/loopback addresses not allowed", -32602)
 		return
 	}
@@ -288,7 +288,7 @@ func (b *WSBridge) handleADNLSendMessage(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.ADNL.Timeout)
 	defer cancel()
 
 	if err := peer.SendCustomMessage(ctx, RawMessage{Data: data}); err != nil {
@@ -330,7 +330,7 @@ func (b *WSBridge) handleADNLPing(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.ADNL.Timeout)
 	defer cancel()
 
 	latency, err := peer.Ping(ctx)
@@ -460,10 +460,10 @@ func (b *WSBridge) handleADNLQuery(client *wsClient, req *WSRequest) {
 	}
 
 	if params.Timeout <= 0 {
-		params.Timeout = 15
+		params.Timeout = int(b.cfg.Namespaces.ADNL.Timeout.Seconds())
 	}
-	if params.Timeout > 60 {
-		params.Timeout = 60
+	if params.Timeout > int(b.cfg.Namespaces.ADNL.QueryMaxTimeout.Seconds()) {
+		params.Timeout = int(b.cfg.Namespaces.ADNL.QueryMaxTimeout.Seconds())
 	}
 
 	ctx, cancel := context.WithTimeout(client.ctx, time.Duration(params.Timeout)*time.Second)
@@ -601,7 +601,7 @@ func (b *WSBridge) handleADNLAnswer(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.ADNL.Timeout)
 	defer cancel()
 
 	if err := peer.Answer(ctx, queryIDBytes, RawMessage{Data: dataBytes}); err != nil {

@@ -11,22 +11,19 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/xssnick/tonutils-go/adnl"
-	"github.com/xssnick/tonutils-go/adnl/overlay"
 )
 
 // testBridge creates a WSBridge with nil deps (only tests WS layer, not TON network).
 // Methods that hit DHT/lite/DNS will return errors — that's what we test.
 func testBridge() *WSBridge {
-	return &WSBridge{
-		clients:        make(map[*wsClient]bool),
-		activePeers:    make(map[string]adnl.Peer),
-		activeOverlays: make(map[string]*overlay.ADNLOverlayWrapper),
-		pendingQueries: make(map[string]pendingQuery),
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
-	}
+	cfg := DefaultBridgeConfig()
+	cfg.AllowedOrigins = []string{"*"}
+	return NewWSBridge(cfg, nil, nil, nil, nil, nil)
+}
+
+// testBridgeWithConfig creates a WSBridge with a custom config for testing.
+func testBridgeWithConfig(cfg *BridgeConfig) *WSBridge {
+	return NewWSBridge(cfg, nil, nil, nil, nil, nil)
 }
 
 // dialTestBridge starts the bridge on an httptest server and returns a connected WS client.
@@ -480,5 +477,121 @@ func TestWSBridge_BroadcastToClients(t *testing.T) {
 		if data["msg"] != "hello" {
 			t.Fatalf("client %d: expected 'hello', got %v", i+1, data["msg"])
 		}
+	}
+}
+
+func TestWSBridge_NamespaceDisabled(t *testing.T) {
+	cfg := DefaultBridgeConfig()
+	cfg.AllowedOrigins = []string{"*"}
+	cfg.Namespaces.Jetton.Enabled = false
+	cfg.Namespaces.NFT.Enabled = false
+	bridge := testBridgeWithConfig(cfg)
+	conn, cleanup := dialTestBridge(t, bridge)
+	defer cleanup()
+
+	// Disabled namespace should return -32601
+	resp := rpc(t, conn, "1", "jetton.getData", map[string]string{"address": "EQ..."})
+	if resp.Error == nil {
+		t.Fatal("expected error for disabled namespace")
+	}
+	if resp.Error.Code != -32601 {
+		t.Fatalf("expected -32601, got %d", resp.Error.Code)
+	}
+
+	resp = rpc(t, conn, "2", "nft.getData", map[string]string{"address": "EQ..."})
+	if resp.Error == nil {
+		t.Fatal("expected error for disabled nft namespace")
+	}
+	if resp.Error.Code != -32601 {
+		t.Fatalf("expected -32601, got %d", resp.Error.Code)
+	}
+
+	// Enabled namespace should still work
+	resp = rpc(t, conn, "3", "network.info", nil)
+	if resp.Error != nil {
+		t.Fatalf("network.info should work: %s", resp.Error.Message)
+	}
+}
+
+func TestWSBridge_APIKey(t *testing.T) {
+	cfg := DefaultBridgeConfig()
+	cfg.AllowedOrigins = []string{"*"}
+	cfg.APIKey = "secret123"
+	bridge := testBridgeWithConfig(cfg)
+
+	server := httptest.NewServer(http.HandlerFunc(bridge.handleWS))
+	defer server.Close()
+
+	// Without API key — should fail
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected connection to be rejected without API key")
+	}
+
+	// With wrong API key — should fail
+	conn, _, err = websocket.DefaultDialer.Dial(wsURL+"?api_key=wrong", nil)
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected connection to be rejected with wrong API key")
+	}
+
+	// With correct API key — should work
+	conn, _, err = websocket.DefaultDialer.Dial(wsURL+"?api_key=secret123", nil)
+	if err != nil {
+		t.Fatalf("expected connection with correct API key: %v", err)
+	}
+	defer conn.Close()
+
+	// Verify we can make RPC calls
+	req := WSRequest{JSONRPC: "2.0", ID: "1", Method: "network.info"}
+	reqData, _ := json.Marshal(req)
+	conn.WriteMessage(websocket.TextMessage, reqData)
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp WSResponse
+	json.Unmarshal(msg, &resp)
+	if resp.Error != nil {
+		t.Fatalf("expected success, got error: %s", resp.Error.Message)
+	}
+}
+
+func TestWSBridge_DHTAllowWrite(t *testing.T) {
+	// Default: allow_write = false
+	cfg := DefaultBridgeConfig()
+	cfg.AllowedOrigins = []string{"*"}
+	bridge := testBridgeWithConfig(cfg)
+	conn, cleanup := dialTestBridge(t, bridge)
+	defer cleanup()
+
+	resp := rpc(t, conn, "1", "dht.storeAddress", nil)
+	if resp.Error == nil {
+		t.Fatal("expected error for disabled dht.storeAddress")
+	}
+	if resp.Error.Code != -32603 {
+		t.Fatalf("expected -32603, got %d", resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "disabled") {
+		t.Fatalf("expected 'disabled' in error message, got: %s", resp.Error.Message)
+	}
+
+	// With allow_write = true
+	cfg2 := DefaultBridgeConfig()
+	cfg2.AllowedOrigins = []string{"*"}
+	cfg2.Namespaces.DHT.AllowWrite = true
+	bridge2 := testBridgeWithConfig(cfg2)
+	conn2, cleanup2 := dialTestBridge(t, bridge2)
+	defer cleanup2()
+
+	resp = rpc(t, conn2, "2", "dht.storeAddress", nil)
+	if resp.Error == nil {
+		t.Fatal("expected error (not implemented)")
+	}
+	// Should get "not yet implemented" instead of "disabled"
+	if strings.Contains(resp.Error.Message, "disabled") {
+		t.Fatalf("expected 'not yet implemented', got: %s", resp.Error.Message)
 	}
 }

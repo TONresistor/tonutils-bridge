@@ -31,38 +31,54 @@ import (
 const defaultConfigURL = "https://ton-blockchain.github.io/global.config.json"
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8081", "WebSocket bridge listen address")
-	configPath := flag.String("config", "", "Path to TON global config JSON (default: fetch from network)")
+	addr := flag.String("addr", "", "WebSocket bridge listen address (overrides config)")
+	configPath := flag.String("config", "", "Path to TON global config JSON (overrides config)")
 	dataDir := flag.String("data-dir", ".", "Directory for persistent data (config.json, ADNL key)")
-	tunnelSections := flag.Int("tunnel", 0, "Number of tunnel sections (0=disabled, >=2 to enable)")
-	verbosity := flag.Int("verbosity", 2, "Log verbosity (0=fatal, 1=error, 2=info, 3=debug)")
+	tunnelSections := flag.Int("tunnel", -1, "Number of tunnel sections (overrides config; 0=disabled, >=2 to enable)")
+	verbosity := flag.Int("verbosity", -1, "Log verbosity (overrides config; 0=fatal, 1=error, 2=info, 3=debug)")
 	flag.Parse()
+
+	// 1. Load config
+	cfg, err := LoadConfig(*dataDir)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to load config")
+	}
+
+	// 2. Apply CLI overrides (flags take precedence over config)
+	if *addr != "" {
+		cfg.Listen = *addr
+	}
+	if *configPath != "" {
+		cfg.TonConfig = *configPath
+	}
+	if *tunnelSections >= 0 {
+		cfg.TunnelSections = *tunnelSections
+	}
+	if *verbosity >= 0 {
+		cfg.Verbosity = *verbosity
+	}
 
 	// Logging
 	zerolog.SetGlobalLevel([]zerolog.Level{
 		zerolog.FatalLevel, zerolog.ErrorLevel, zerolog.InfoLevel, zerolog.DebugLevel,
-	}[max(0, min(*verbosity, 3))])
+	}[max(0, min(cfg.Verbosity, 3))])
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen})
 
-	if err := run(*addr, *configPath, *dataDir, *tunnelSections); err != nil {
+	if err := run(cfg); err != nil {
 		log.Fatal().Err(err).Msg("Bridge stopped")
 	}
 }
 
-func run(addr, configPath, dataDir string, tunnelSections int) error {
+func run(cfg *Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// 1. Load persistent ADNL key
-	cfg, err := LoadConfig(dataDir)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
 	privKey := ed25519.NewKeyFromSeed(cfg.ADNLKey)
 
 	// 2. Load TON network config
 	log.Info().Msg("Loading TON network config...")
-	lsCfg, err := loadConfig(configPath)
+	lsCfg, err := loadConfig(cfg.TonConfig)
 	if err != nil {
 		return fmt.Errorf("failed to load TON config: %w", err)
 	}
@@ -77,9 +93,9 @@ func run(addr, configPath, dataDir string, tunnelSections int) error {
 
 	// 4. Network manager (tunnel or direct)
 	var netMgr adnl.NetManager
-	if tunnelSections >= 2 {
-		log.Info().Int("sections", tunnelSections).Msg("Starting ADNL tunnel...")
-		nm, err := startTunnel(ctx, lsCfg, tunnelSections)
+	if cfg.TunnelSections >= 2 {
+		log.Info().Int("sections", cfg.TunnelSections).Msg("Starting ADNL tunnel...")
+		nm, err := startTunnel(ctx, lsCfg, cfg.TunnelSections)
 		if err != nil {
 			return fmt.Errorf("tunnel init failed: %w", err)
 		}
@@ -120,10 +136,10 @@ func run(addr, configPath, dataDir string, tunnelSections int) error {
 
 	// 7. Create and start bridge
 	wsAPI := ton.NewAPIClient(connPool, ton.ProofCheckPolicyFast).WithRetry(2).WithTimeout(5 * time.Second)
-	bridge := wsbridge.NewWSBridge(dhtClient, wsAPI, dnsClient, wsGate, privKey)
+	bridge := wsbridge.NewWSBridge(cfg.ToWSBridgeConfig(), dhtClient, wsAPI, dnsClient, wsGate, privKey)
 
-	log.Info().Str("addr", addr).Msg("Starting WebSocket bridge")
-	return bridge.Start(ctx, addr)
+	log.Info().Str("addr", cfg.Listen).Msg("Starting WebSocket bridge")
+	return bridge.Start(ctx, cfg.Listen)
 }
 
 // startTunnel discovers relay nodes via DHT and starts an ADNL tunnel,

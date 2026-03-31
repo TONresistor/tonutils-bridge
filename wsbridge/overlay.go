@@ -41,8 +41,8 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	client.peersMu.Lock()
 	overlayCount := len(client.overlays)
 	client.peersMu.Unlock()
-	if overlayCount >= 10 {
-		b.sendError(client, req.ID, "max overlays limit reached (10)", -32602)
+	if overlayCount >= b.cfg.Namespaces.Overlay.MaxOverlays {
+		b.sendError(client, req.ID, fmt.Sprintf("max overlays limit reached (%d)", b.cfg.Namespaces.Overlay.MaxOverlays), -32602)
 		return
 	}
 
@@ -227,7 +227,7 @@ func (b *WSBridge) handleOverlayGetPeers(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Overlay.Timeout)
 	defer cancel()
 
 	nodes, err := ow.GetRandomPeers(ctx)
@@ -299,7 +299,7 @@ func (b *WSBridge) handleOverlaySendMessage(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Overlay.Timeout)
 	defer cancel()
 
 	if err := ow.SendCustomMessage(ctx, RawMessage{Data: data}); err != nil {
@@ -350,10 +350,10 @@ func (b *WSBridge) handleOverlayQuery(client *wsClient, req *WSRequest) {
 	}
 
 	if params.Timeout <= 0 {
-		params.Timeout = 15
+		params.Timeout = int(b.cfg.Namespaces.Overlay.Timeout.Seconds())
 	}
-	if params.Timeout > 60 {
-		params.Timeout = 60
+	if params.Timeout > int(b.cfg.Namespaces.Overlay.QueryMaxTimeout.Seconds()) {
+		params.Timeout = int(b.cfg.Namespaces.Overlay.QueryMaxTimeout.Seconds())
 	}
 
 	ctx, cancel := context.WithTimeout(client.ctx, time.Duration(params.Timeout)*time.Second)
@@ -505,7 +505,7 @@ func (b *WSBridge) handleOverlayAnswer(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Overlay.Timeout)
 	defer cancel()
 
 	if err := peer.Answer(ctx, queryIDBytes, RawMessage{Data: dataBytes}); err != nil {

@@ -19,7 +19,7 @@ import (
 )
 
 func (b *WSBridge) handleSubscribeTransactions(client *wsClient, req *WSRequest) {
-	if atomic.AddInt32(&client.activeSubs, 1) > maxSubscriptionsPerClient {
+	if atomic.AddInt32(&client.activeSubs, 1) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -1)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
 		return
@@ -112,7 +112,7 @@ func (b *WSBridge) handleSubscribeTransactions(client *wsClient, req *WSRequest)
 }
 
 func (b *WSBridge) handleSubscribeBlocks(client *wsClient, req *WSRequest) {
-	if atomic.AddInt32(&client.activeSubs, 1) > maxSubscriptionsPerClient {
+	if atomic.AddInt32(&client.activeSubs, 1) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -1)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
 		return
@@ -198,7 +198,7 @@ func (b *WSBridge) handleSubscribeBlocks(client *wsClient, req *WSRequest) {
 }
 
 func (b *WSBridge) handleSubscribeAccountState(client *wsClient, req *WSRequest) {
-	if atomic.AddInt32(&client.activeSubs, 1) > maxSubscriptionsPerClient {
+	if atomic.AddInt32(&client.activeSubs, 1) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -1)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
 		return
@@ -325,7 +325,7 @@ func (b *WSBridge) handleSubscribeAccountState(client *wsClient, req *WSRequest)
 }
 
 func (b *WSBridge) handleSubscribeNewTransactions(client *wsClient, req *WSRequest) {
-	if atomic.AddInt32(&client.activeSubs, 1) > maxSubscriptionsPerClient {
+	if atomic.AddInt32(&client.activeSubs, 1) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -1)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
 		return
@@ -428,7 +428,7 @@ func (b *WSBridge) handleSubscribeNewTransactions(client *wsClient, req *WSReque
 }
 
 func (b *WSBridge) handleSubscribeConfigChanges(client *wsClient, req *WSRequest) {
-	if atomic.AddInt32(&client.activeSubs, 1) > maxSubscriptionsPerClient {
+	if atomic.AddInt32(&client.activeSubs, 1) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -1)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
 		return
@@ -446,8 +446,8 @@ func (b *WSBridge) handleSubscribeConfigChanges(client *wsClient, req *WSRequest
 		b.sendError(client, req.ID, "params list must not be empty", -32602)
 		return
 	}
-	if len(params.Params) > 50 {
-		b.sendError(client, req.ID, "too many params (max 50)", -32602)
+	if len(params.Params) > b.cfg.Namespaces.Subscribe.MaxConfigParams {
+		b.sendError(client, req.ID, fmt.Sprintf("too many params (max %d)", b.cfg.Namespaces.Subscribe.MaxConfigParams), -32602)
 		return
 	}
 
@@ -559,13 +559,13 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 		b.sendError(client, req.ID, "accounts list must not be empty", -32602)
 		return
 	}
-	if len(params.Accounts) > 100 {
-		b.sendError(client, req.ID, "too many accounts (max 100)", -32602)
+	if len(params.Accounts) > b.cfg.Namespaces.Subscribe.MaxMultiAccounts {
+		b.sendError(client, req.ID, fmt.Sprintf("too many accounts (max %d)", b.cfg.Namespaces.Subscribe.MaxMultiAccounts), -32602)
 		return
 	}
 
 	subCount := int32(len(params.Accounts))
-	if atomic.AddInt32(&client.activeSubs, subCount) > maxSubscriptionsPerClient {
+	if atomic.AddInt32(&client.activeSubs, subCount) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -subCount)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
 		return
