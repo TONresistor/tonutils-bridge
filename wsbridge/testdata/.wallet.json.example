@@ -1,0 +1,4 @@
+{
+  "address": "UQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "private_key": "base64-encoded-32-byte-ed25519-seed"
+}

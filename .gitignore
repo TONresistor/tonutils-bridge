@@ -1,0 +1,10 @@
+tonutils-bridge
+*.exe
+*.dll
+*.so
+*.dylib
+.idea/
+.vscode/
+.env
+config.json
+wsbridge/testdata/.wallet.json
