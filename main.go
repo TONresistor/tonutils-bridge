@@ -288,7 +288,7 @@ func initDNSResolver(ctx context.Context, cfg *liteclient.GlobalConfig) (*litecl
 		return nil, nil, err
 	}
 
-	api := ton.NewAPIClient(pool)
+	api := ton.NewAPIClient(pool).WithTimeout(5 * time.Second).WithRetry()
 
 	var root *address.Address
 	var err error
