@@ -149,6 +149,31 @@ func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 				b.sendError(client, req.ID, fmt.Sprintf("unsupported param at index %d: string is not a valid integer", i), -32602)
 				return
 			}
+		case map[string]any:
+			// Typed envelope for cell/slice params:
+			//   {"type": "slice", "boc": "<base64 BOC>"}
+			//   {"type": "cell",  "boc": "<base64 BOC>"}
+			kind, _ := v["type"].(string)
+			bocB64, _ := v["boc"].(string)
+			if bocB64 == "" || (kind != "slice" && kind != "cell") {
+				b.sendError(client, req.ID, fmt.Sprintf("unsupported object param at index %d: expected {type:'slice'|'cell', boc:<base64>}", i), -32602)
+				return
+			}
+			bocBytes, err := decodeBase64(bocB64)
+			if err != nil {
+				b.sendError(client, req.ID, fmt.Sprintf("invalid base64 boc at index %d: %s", i, err.Error()), -32602)
+				return
+			}
+			c, err := cell.FromBOC(bocBytes)
+			if err != nil {
+				b.sendError(client, req.ID, fmt.Sprintf("invalid BOC at index %d: %s", i, err.Error()), -32602)
+				return
+			}
+			if kind == "slice" {
+				methodParams = append(methodParams, c.BeginParse())
+			} else {
+				methodParams = append(methodParams, c)
+			}
 		default:
 			b.sendError(client, req.ID, fmt.Sprintf("unsupported param type at index %d", i), -32602)
 			return
