@@ -12,6 +12,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/tl"
 )
 
@@ -220,12 +221,12 @@ func (b *WSBridge) handleADNLConnectByADNL(client *wsClient, req *WSRequest) {
 	}
 
 	// C8: SSRF protection — reject private/loopback addresses resolved via DHT
-	if b.cfg.Namespaces.ADNL.SSRFProtection && isPrivateIP(addrs.Addresses[0].IP) {
+	if b.cfg.Namespaces.ADNL.SSRFProtection && isPrivateIP(address.IPValue(addrs.Addresses[0])) {
 		b.sendError(client, req.ID, "private/loopback addresses not allowed", -32602)
 		return
 	}
 
-	addr := fmt.Sprintf("%s:%d", addrs.Addresses[0].IP.String(), addrs.Addresses[0].Port)
+	addr := fmt.Sprintf("%s:%d", address.IPValue(addrs.Addresses[0]).String(), address.PortValue(addrs.Addresses[0]))
 
 	peer, err := b.gate.RegisterClient(addr, pubKey)
 	if err != nil {

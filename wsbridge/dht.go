@@ -50,8 +50,8 @@ func (b *WSBridge) handleFindAddresses(client *wsClient, req *WSRequest) {
 	results := []addrResult{}
 	for _, addr := range addrs.Addresses {
 		results = append(results, addrResult{
-			IP:   addr.IP.String(),
-			Port: addr.Port,
+			IP:   address.IPValue(addr).String(),
+			Port: address.PortValue(addr),
 		})
 	}
 
@@ -243,7 +243,7 @@ func (b *WSBridge) handleDHTStoreAddress(client *wsClient, req *WSRequest) {
 	}
 
 	addrList := address.List{
-		Addresses: make([]*address.UDP, 0, len(params.Addresses)),
+		Addresses: make([]address.Address, 0, len(params.Addresses)),
 	}
 	for _, a := range params.Addresses {
 		ip := net.ParseIP(a.IP)
@@ -270,15 +270,12 @@ func (b *WSBridge) handleDHTStoreAddress(client *wsClient, req *WSRequest) {
 	if params.TTL > 0 {
 		ttl = time.Duration(params.TTL) * time.Second
 	}
-	replicas := 3
-	if params.Replicas > 0 {
-		replicas = params.Replicas
-	}
-
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.DHT.Timeout)
 	defer cancel()
 
-	made, idKey, err := b.dht.StoreAddress(ctx, addrList, ttl, b.key, replicas)
+	// params.Replicas is accepted for wire compatibility but ignored:
+	// tonutils-go v1.17+ internalizes DHT replication.
+	made, idKey, err := b.dht.StoreAddress(ctx, addrList, ttl, b.key)
 	if err != nil {
 		b.sendError(client, req.ID, "dht store address failed: "+err.Error())
 		return
@@ -359,15 +356,12 @@ func (b *WSBridge) handleDHTStoreOverlayNodes(client *wsClient, req *WSRequest) 
 	if params.TTL > 0 {
 		ttl = time.Duration(params.TTL) * time.Second
 	}
-	replicas := 3
-	if params.Replicas > 0 {
-		replicas = params.Replicas
-	}
-
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.DHT.Timeout)
 	defer cancel()
 
-	made, idKey, err := b.dht.StoreOverlayNodes(ctx, overlayKeyBytes, nodesList, ttl, replicas)
+	// params.Replicas is accepted for wire compatibility but ignored:
+	// tonutils-go v1.17+ internalizes DHT replication.
+	made, idKey, err := b.dht.StoreOverlayNodes(ctx, overlayKeyBytes, nodesList, ttl)
 	if err != nil {
 		b.sendError(client, req.ID, "dht store overlay nodes failed: "+err.Error())
 		return

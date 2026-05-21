@@ -170,7 +170,12 @@ func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 				return
 			}
 			if kind == "slice" {
-				methodParams = append(methodParams, c.BeginParse())
+				sl, err := c.BeginParse()
+				if err != nil {
+					b.sendError(client, req.ID, fmt.Sprintf("invalid slice param at index %d: %s", i, err.Error()), -32602)
+					return
+				}
+				methodParams = append(methodParams, sl)
 			} else {
 				methodParams = append(methodParams, c)
 			}
@@ -897,8 +902,13 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 	// An ExternalIn message structure:
 	//   ext_in_msg_info$10 src:MsgAddressExt dest:MsgAddressInt import_fee:Grams = CommonMsgInfo;
 	// We need to parse the cell to extract dest address and body
+	msgSlice, err := msgCell.BeginParse()
+	if err != nil {
+		b.sendError(client, req.ID, "invalid BOC: "+err.Error(), -32602)
+		return
+	}
 	var extMsg tlb.ExternalMessage
-	if err := tlb.LoadFromCell(&extMsg, msgCell.BeginParse()); err != nil {
+	if err := tlb.LoadFromCell(&extMsg, msgSlice); err != nil {
 		b.sendError(client, req.ID, "failed to parse external message: "+err.Error())
 		return
 	}

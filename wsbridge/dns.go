@@ -96,8 +96,9 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 		domainCell := builder.EndCell()
 
 		block, blkErr := b.api.CurrentMasterchainInfo(ctx)
-		if blkErr == nil {
-			expRes, expErr := b.api.RunGetMethod(ctx, block, nftData.CollectionAddress, "getexpiration", domainCell.BeginParse())
+		domainSlice, bpErr := domainCell.BeginParse()
+		if blkErr == nil && bpErr == nil {
+			expRes, expErr := b.api.RunGetMethod(ctx, block, nftData.CollectionAddress, "getexpiration", domainSlice)
 			if expErr == nil {
 				stack := expRes.AsTuple()
 				if len(stack) >= 1 {

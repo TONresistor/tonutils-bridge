@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"time"
 
-	"github.com/xssnick/tonutils-go/ton/payments"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
+	pnclient "github.com/xssnick/ton-payment-network/tonpayments/chain/client"
 )
 
 func (b *WSBridge) handlePaymentGetChannelState(client *wsClient, req *WSRequest) {
@@ -27,64 +29,55 @@ func (b *WSBridge) handlePaymentGetChannelState(client *wsClient, req *WSRequest
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Payment.Timeout)
 	defer cancel()
 
-	block, err := b.api.CurrentMasterchainInfo(ctx)
+	pClient := payments.NewPaymentChannelClient(pnclient.NewTON(b.api))
+	ch, err := pClient.GetChannel(ctx, addr, false, time.Time{})
 	if err != nil {
-		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
-		return
-	}
-
-	pClient := payments.NewPaymentChannelClient(b.api)
-	ch, err := pClient.GetAsyncChannel(ctx, block, addr, false)
-	if err != nil {
-		b.sendError(client, req.ID, "get async channel failed: "+err.Error())
+		b.sendError(client, req.ID, "get channel failed: "+err.Error())
 		return
 	}
 
 	s := ch.Storage
 
 	result := map[string]any{
-		"status":            int(ch.Status),
-		"initialized":       s.Initialized,
-		"balance_a":         s.BalanceA.Nano().String(),
-		"balance_b":         s.BalanceB.Nano().String(),
-		"key_a":             base64.StdEncoding.EncodeToString(s.KeyA),
-		"key_b":             base64.StdEncoding.EncodeToString(s.KeyB),
-		"channel_id":        hex.EncodeToString(s.ChannelID),
-		"committed_seqno_a": s.CommittedSeqnoA,
-		"committed_seqno_b": s.CommittedSeqnoB,
-		"quarantine":        nil,
-		"dest_a":            nil,
-		"dest_b":            nil,
-		"excess_fee":        s.Payments.ExcessFee.Nano().String(),
+		"status":          int(ch.Status),
+		"is_a":            s.IsA,
+		"initialized":     s.Initialized,
+		"committed_seqno": s.CommittedSeqno,
+		"wallet_seqno":    s.WalletSeqno,
+		"key_a":           base64.StdEncoding.EncodeToString(s.KeyA),
+		"key_b":           base64.StdEncoding.EncodeToString(s.KeyB),
+		"channel_id":      hex.EncodeToString(s.ChannelID),
+		"party_address":   nil,
 		"closing_config": map[string]any{
-			"quarantine_duration":         s.ClosingConfig.QuarantineDuration,
-			"conditional_close_duration":  s.ClosingConfig.ConditionalCloseDuration,
-			"misbehavior_fine":            s.ClosingConfig.MisbehaviorFine.Nano().String(),
+			"quarantine_duration":               s.ClosingConfig.QuarantineDuration,
+			"conditional_close_duration":         s.ClosingConfig.ConditionalCloseDuration,
+			"actions_duration":                   s.ClosingConfig.ActionsDuration,
+			"replication_message_attach_amount":  s.ClosingConfig.ReplicationMessageAttachAmount.Nano().String(),
 		},
+		"quarantine": nil,
 	}
 
-	if s.Payments.DestA != nil {
-		result["dest_a"] = s.Payments.DestA.String()
-	}
-	if s.Payments.DestB != nil {
-		result["dest_b"] = s.Payments.DestB.String()
+	if s.PartyAddress != nil {
+		result["party_address"] = s.PartyAddress.String()
 	}
 
 	if s.Quarantine != nil {
 		q := s.Quarantine
-		result["quarantine"] = map[string]any{
-			"quarantine_starts":   q.QuarantineStarts,
-			"state_committed_by_a": q.StateCommittedByA,
-			"state_challenged":    q.StateChallenged,
-			"state_a": map[string]any{
-				"seqno": q.StateA.Seqno,
-				"sent":  q.StateA.Sent.Nano().String(),
-			},
-			"state_b": map[string]any{
-				"seqno": q.StateB.Seqno,
-				"sent":  q.StateB.Sent.Nano().String(),
-			},
+		qm := map[string]any{
+			"seqno":                    q.Seqno,
+			"quarantine_starts":        q.QuarantineStarts,
+			"committed_by_owner":       q.CommittedByOwner,
+			"our_settlement_finalized": q.OurSettlementFinalized,
+			"actions_to_execute_hash":  hex.EncodeToString(q.ActionsToExecuteHash),
+			"their_state":              nil,
 		}
+		if q.TheirState != nil {
+			qm["their_state"] = map[string]any{
+				"conditionals_hash":  hex.EncodeToString(q.TheirState.ConditionalsHash),
+				"action_states_hash": hex.EncodeToString(q.TheirState.ActionStatesHash),
+			}
+		}
+		result["quarantine"] = qm
 	}
 
 	b.sendResult(client, req.ID, result)

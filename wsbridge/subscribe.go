@@ -88,13 +88,16 @@ func (b *WSBridge) handleSubscribeTransactions(client *wsClient, req *WSRequest)
 				if tx.IO.In != nil {
 					payload := tx.IO.In.Msg.Payload()
 					if payload != nil {
-						opcode, parseErr := payload.BeginParse().LoadUInt(32)
-						if parseErr == nil {
-							op := uint32(opcode)
-							for _, allowed := range params.Operations {
-								if op == allowed {
-									matched = true
-									break
+						payloadSlice, bpErr := payload.BeginParse()
+						if bpErr == nil {
+							opcode, parseErr := payloadSlice.LoadUInt(32)
+							if parseErr == nil {
+								op := uint32(opcode)
+								for _, allowed := range params.Operations {
+									if op == allowed {
+										matched = true
+										break
+									}
 								}
 							}
 						}
@@ -639,13 +642,16 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 						if tx.IO.In != nil {
 							payload := tx.IO.In.Msg.Payload()
 							if payload != nil {
-								opcode, parseErr := payload.BeginParse().LoadUInt(32)
-								if parseErr == nil {
-									op := uint32(opcode)
-									for _, allowed := range ops {
-										if op == allowed {
-											matched = true
-											break
+								payloadSlice, bpErr := payload.BeginParse()
+								if bpErr == nil {
+									opcode, parseErr := payloadSlice.LoadUInt(32)
+									if parseErr == nil {
+										op := uint32(opcode)
+										for _, allowed := range ops {
+											if op == allowed {
+												matched = true
+												break
+											}
 										}
 									}
 								}
