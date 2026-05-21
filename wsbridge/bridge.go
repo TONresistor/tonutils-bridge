@@ -390,6 +390,8 @@ func (b *WSBridge) handleRequest(client *wsClient, req *WSRequest) {
 		b.handleGetAccountState(client, req)
 	case "lite.runMethod":
 		b.handleRunMethod(client, req)
+	case "lite.emulateMessage":
+		b.handleEmulateMessage(client, req)
 	case "lite.sendMessage":
 		b.handleSendMessage(client, req)
 	case "lite.getTransactions":

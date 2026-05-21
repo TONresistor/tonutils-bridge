@@ -13,7 +13,9 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bwesterb/go-ristretto v1.2.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/kevinms/leakybucket-go v0.0.0-20200115003610-082473db97ca // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

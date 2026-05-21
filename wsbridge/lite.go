@@ -15,6 +15,7 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
+	"github.com/xssnick/tonutils-go/tvm"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
@@ -199,6 +200,203 @@ func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 		"exit_code": 0,
 		"stack":     stack,
 	})
+}
+
+// handleEmulateMessage runs a message locally against the target account's real
+// on-chain state using the native Go TVM (tonutils-go v1.17+), without
+// broadcasting it. Useful as a dry-run before lite.sendMessage: it reports
+// whether the message is accepted, its exit code, gas usage and emitted
+// messages.
+//
+// The TVM emulator is marked alpha upstream; results may differ from real
+// on-chain execution in edge cases.
+func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
+	var params struct {
+		Address string `json:"address"`
+		BOC     string `json:"boc"`
+		Type    string `json:"type"`   // "external" (default) | "internal"
+		Amount  string `json:"amount"` // nano-TON, required when type=internal
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
+		return
+	}
+
+	msgType := params.Type
+	if msgType == "" {
+		msgType = "external"
+	}
+	if msgType != "external" && msgType != "internal" {
+		b.sendError(client, req.ID, "invalid type: expected 'external' or 'internal'", -32602)
+		return
+	}
+
+	addr, err := parseAddress(params.Address)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid address: "+err.Error(), -32602)
+		return
+	}
+
+	bocBytes, err := decodeBase64(params.BOC)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid base64 boc: "+err.Error(), -32602)
+		return
+	}
+	msgCell, err := cell.FromBOC(bocBytes)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid BOC: "+err.Error(), -32602)
+		return
+	}
+
+	var amount uint64
+	if msgType == "internal" {
+		amount, err = strconv.ParseUint(params.Amount, 10, 64)
+		if err != nil {
+			b.sendError(client, req.ID, "invalid amount: expected nano-TON integer string", -32602)
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
+	defer cancel()
+
+	block, err := b.api.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
+		return
+	}
+
+	acc, err := b.api.GetAccount(ctx, block, addr)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get account: "+err.Error())
+		return
+	}
+	if acc.Code == nil || acc.Data == nil {
+		b.sendError(client, req.ID, "account is not initialized, cannot emulate", -32602)
+		return
+	}
+
+	bcCfg, err := b.api.GetBlockchainConfig(ctx, block)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
+		return
+	}
+
+	balance := big.NewInt(0)
+	if acc.State != nil && acc.State.IsValid {
+		balance = acc.State.Balance.Nano()
+	}
+
+	emCfg := tvm.MessageEmulationConfig{
+		Address:    addr,
+		Now:        uint32(time.Now().Unix()),
+		Balance:    balance,
+		ConfigRoot: bcCfg.Root,
+		RandSeed:   make([]byte, 32),
+	}
+
+	machine := tvm.NewTVM()
+
+	var res *tvm.MessageExecutionResult
+	if msgType == "external" {
+		sl, bpErr := msgCell.BeginParse()
+		if bpErr != nil {
+			b.sendError(client, req.ID, "invalid external message BOC: "+bpErr.Error(), -32602)
+			return
+		}
+		var extMsg tlb.ExternalMessage
+		if lErr := tlb.LoadFromCell(&extMsg, sl); lErr != nil {
+			b.sendError(client, req.ID, "failed to parse external message: "+lErr.Error(), -32602)
+			return
+		}
+		res, err = machine.EmulateExternalMessage(acc.Code, acc.Data, &extMsg, emCfg)
+	} else {
+		res, err = machine.EmulateInternalMessage(acc.Code, acc.Data, msgCell, amount, emCfg)
+	}
+	if err != nil {
+		b.sendError(client, req.ID, "emulation failed: "+err.Error())
+		return
+	}
+
+	result := map[string]any{
+		"accepted":     res.Accepted,
+		"exit_code":    res.ExitCode,
+		"gas_used":     res.GasUsed,
+		"steps":        res.Steps,
+		"committed":    res.Committed,
+		"new_data":     nil,
+		"actions":      nil,
+		"out_messages": []any{},
+	}
+	if res.Committed && res.Data != nil {
+		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithFlags(false))
+	}
+	if res.Actions != nil {
+		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithFlags(false))
+		result["out_messages"] = parseOutActions(res.Actions)
+	}
+
+	b.sendResult(client, req.ID, result)
+}
+
+// parseOutActions best-effort decodes a c5 action list (out_list) into a slice
+// of out-message descriptors, in send order. The raw actions BOC is returned
+// separately, so a partial or failed parse here loses no information.
+func parseOutActions(actions *cell.Cell) []any {
+	out := []any{}
+	cur := actions
+	for cur != nil {
+		if cur.BitsSize() == 0 && cur.RefsNum() == 0 {
+			break // out_list_empty terminator
+		}
+		sl, err := cur.BeginParse()
+		if err != nil {
+			break
+		}
+		prev, err := sl.LoadRefCell()
+		if err != nil {
+			break
+		}
+		tag, err := sl.LoadUInt(32)
+		if err != nil {
+			break
+		}
+		if tag == 0x0ec3c86d { // action_send_msg
+			entry := map[string]any{}
+			if mode, mErr := sl.LoadUInt(8); mErr == nil {
+				entry["mode"] = mode
+			}
+			if msgRef, rErr := sl.LoadRefCell(); rErr == nil {
+				if msl, pErr := msgRef.BeginParse(); pErr == nil {
+					var m tlb.Message
+					if m.LoadFromCell(msl) == nil {
+						if m.MsgType == tlb.MsgTypeInternal {
+							im := m.AsInternal()
+							entry["type"] = "internal"
+							if im.DstAddr != nil {
+								entry["to"] = im.DstAddr.String()
+							}
+							entry["value"] = im.Amount.Nano().String()
+							if im.Body != nil {
+								entry["body"] = base64.StdEncoding.EncodeToString(im.Body.ToBOCWithFlags(false))
+							}
+						} else {
+							entry["type"] = "external_out"
+						}
+					}
+				}
+			}
+			out = append(out, entry)
+		} else {
+			out = append(out, map[string]any{"type": "other"})
+		}
+		cur = prev
+	}
+	// out_list is stored newest-first; reverse to send order.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 func (b *WSBridge) handleSendMessage(client *wsClient, req *WSRequest) {

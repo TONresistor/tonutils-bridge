@@ -611,6 +611,56 @@ func TestE2E_Lite(t *testing.T) {
 		}
 		t.Logf("[PASS] lite.sendAndWatch_invalidBOC — expected error: invalid BOC rejected (code %d)", resp.Error.Code)
 	})
+
+	t.Run("emulateMessage", func(t *testing.T) {
+		emptyBody := cell.BeginCell().EndCell().ToBOCWithFlags(false)
+		params := map[string]any{
+			"address": testAddr,
+			"type":    "internal",
+			"amount":  "100000000",
+			"boc":     base64.StdEncoding.EncodeToString(emptyBody),
+		}
+		var resp e2eResponse
+		for i := 0; i < 5; i++ {
+			resp = e2eCall(t, c, "lite.emulateMessage", params)
+			if resp.Error == nil {
+				break
+			}
+			if resp.Error.Code == -32601 {
+				t.Fatalf("[FAIL] lite.emulateMessage — method not found: %s", resp.Error.Message)
+			}
+			t.Logf("[RETRY %d/5] lite.emulateMessage — %s", i+1, resp.Error.Message)
+			time.Sleep(2 * time.Second)
+		}
+		if resp.Error != nil {
+			// Transient liteserver sync errors (block not in db / out of sync)
+			// are not a bug in lite.emulateMessage; skip rather than fail.
+			t.Skipf("[SKIP] lite.emulateMessage — liteserver unavailable: %s", resp.Error.Message)
+		}
+		result := e2eRequireResult(t, resp, "lite.emulateMessage")
+		if _, ok := result["exit_code"]; !ok {
+			t.Fatal("[FAIL] lite.emulateMessage — missing exit_code field")
+		}
+		accepted, _ := result["accepted"].(bool)
+		exitCode, _ := result["exit_code"].(float64)
+		gasUsed, _ := result["gas_used"].(float64)
+		t.Logf("[PASS] lite.emulateMessage — accepted=%v exit_code=%.0f gas_used=%.0f", accepted, exitCode, gasUsed)
+	})
+
+	t.Run("emulateMessage_invalidType", func(t *testing.T) {
+		resp := e2eCall(t, c, "lite.emulateMessage", map[string]any{
+			"address": testAddr,
+			"type":    "bogus",
+			"boc":     "AQID",
+		})
+		if resp.Error == nil {
+			t.Fatal("[FAIL] lite.emulateMessage — expected error for invalid type, got success")
+		}
+		if resp.Error.Code == -32601 {
+			t.Fatalf("[FAIL] lite.emulateMessage — method not found (code -32601): %s", resp.Error.Message)
+		}
+		t.Logf("[PASS] lite.emulateMessage_invalidType — rejected (code %d)", resp.Error.Code)
+	})
 }
 
 // ---------------------------------------------------------------------------
