@@ -1,0 +1,90 @@
+schema = 3
+
+[mod]
+  [mod.'filippo.io/edwards25519']
+    version = 'v1.1.0'
+    hash = 'sha256-9ACANrgWZSd5HYPfDZHY8DVbPSC9LOMgy8deq3rDOoc='
+
+  [mod.'github.com/beorn7/perks']
+    version = 'v1.0.1'
+    hash = 'sha256-h75GUqfwJKngCJQVE5Ao5wnO3cfKD9lSIteoLp/3xJ4='
+
+  [mod.'github.com/cespare/xxhash/v2']
+    version = 'v2.3.0'
+    hash = 'sha256-7hRlwSR+fos1kx4VZmJ/7snR7zHh8ZFKX+qqqqGcQpY='
+
+  [mod.'github.com/golang/snappy']
+    version = 'v1.0.0'
+    hash = 'sha256-o/S91mX4ysjuG/oRHLs8qSyfb1Risf/YzMuW5u7d3U4='
+
+  [mod.'github.com/gorilla/websocket']
+    version = 'v1.5.3'
+    hash = 'sha256-vTIGEFMEi+30ZdO6ffMNJ/kId6pZs5bbyqov8xe9BM0='
+
+  [mod.'github.com/kevinms/leakybucket-go']
+    version = 'v0.0.0-20200115003610-082473db97ca'
+    hash = 'sha256-moXd9sQs/KcOyHGo8XgZgCPFblnhWQB08NMxdAhzn/w='
+
+  [mod.'github.com/mattn/go-colorable']
+    version = 'v0.1.14'
+    hash = 'sha256-JC60PjKj7MvhZmUHTZ9p372FV72I9Mxvli3fivTbxuA='
+
+  [mod.'github.com/mattn/go-isatty']
+    version = 'v0.0.20'
+    hash = 'sha256-qhw9hWtU5wnyFyuMbKx+7RB8ckQaFQ8D+8GKPkN3HHQ='
+
+  [mod.'github.com/munnerz/goautoneg']
+    version = 'v0.0.0-20191010083416-a7dc8b61c822'
+    hash = 'sha256-79URDDFenmGc9JZu+5AXHToMrtTREHb3BC84b/gym9Q='
+
+  [mod.'github.com/prometheus/client_golang']
+    version = 'v1.22.0'
+    hash = 'sha256-OJ/9rlWG1DIPQJAZUTzjykkX0o+f+4IKLvW8YityaMQ='
+
+  [mod.'github.com/prometheus/client_model']
+    version = 'v0.6.1'
+    hash = 'sha256-rIDyUzNfxRA934PIoySR0EhuBbZVRK/25Jlc/r8WODw='
+
+  [mod.'github.com/prometheus/common']
+    version = 'v0.62.0'
+    hash = 'sha256-UFccvzMJaBrUpnqVgZgohRcgk5SKMi/UJnXNtazCnx8='
+
+  [mod.'github.com/prometheus/procfs']
+    version = 'v0.15.1'
+    hash = 'sha256-H+WXJemFFwdoglmD6p7JRjrJJZmIVAmJwYmLbZ8Q9sw='
+
+  [mod.'github.com/rs/zerolog']
+    version = 'v1.34.0'
+    hash = 'sha256-M503WwzPvqbOas3f70FQNXoWG17eV/XU6FubtB6P0uo='
+
+  [mod.'github.com/syndtr/goleveldb']
+    version = 'v1.0.0'
+    hash = 'sha256-rW7SW6nehede0oMZo4NBatM6Eizbnlb7xYoX/dcDUxA='
+
+  [mod.'github.com/ton-blockchain/adnl-tunnel']
+    version = 'v0.1.8'
+    hash = 'sha256-2a2lAgB42rtFhWyOKLK1Wb8AGVevV8iYlI59pMMYNiw='
+
+  [mod.'github.com/xssnick/raptorq']
+    version = 'v1.3.0'
+    hash = 'sha256-lojoKrd1hVNX89FQOuZ/COemkPFGjDZ5A47q2uwgWRc='
+
+  [mod.'github.com/xssnick/ton-payment-network']
+    version = 'v1.2.3'
+    hash = 'sha256-1ocZtq2/8FoKgnRk79btSxmaHxhGHP2IZAsF9JNmwDk='
+
+  [mod.'github.com/xssnick/tonutils-go']
+    version = 'v1.15.5'
+    hash = 'sha256-ZuTy3hJsQKvcRUEHzs022UfjJ/xBh/iOo0YIFhjPR2I='
+
+  [mod.'golang.org/x/crypto']
+    version = 'v0.42.0'
+    hash = 'sha256-qa6cGxZUhVnbkpVzfvLGQQsl/NCqNceJp9SIx5vkyiI='
+
+  [mod.'golang.org/x/sys']
+    version = 'v0.36.0'
+    hash = 'sha256-9h4SHGnlJzmTENUp6226hC8fQ73QrQC3D85NNMxLuXg='
+
+  [mod.'google.golang.org/protobuf']
+    version = 'v1.36.5'
+    hash = 'sha256-isupBiQUrKPEFzK94k5cgzM3Ab5fMXp352/zcsXV1JU='
