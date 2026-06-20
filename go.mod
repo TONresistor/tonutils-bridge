@@ -7,7 +7,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/ton-blockchain/adnl-tunnel v0.2.0
 	github.com/xssnick/ton-payment-network v1.3.0
-	github.com/xssnick/tonutils-go v1.17.0
+	github.com/xssnick/tonutils-go v1.17.2
 )
 
 require (
