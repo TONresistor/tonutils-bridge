@@ -339,6 +339,171 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 	b.sendResult(client, req.ID, result)
 }
 
+// handleEmulateTransaction runs a FULL transaction locally against the target
+// account's real on-chain state using the native Go TVM, without broadcasting.
+// Unlike lite.emulateMessage (compute-phase only), it executes every phase
+// (storage, credit, compute, action) and reports the real fee breakdown and
+// total fees — the preflight a wallet needs before lite.sendMessage.
+//
+// `boc` must be a FULL message cell (an external-in message, as passed to
+// lite.sendMessage; or a full internal message). The account must be initialized.
+// The TVM emulator is alpha upstream; results may differ in edge cases.
+func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
+	var params struct {
+		Address string `json:"address"`
+		BOC     string `json:"boc"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
+		return
+	}
+
+	addr, err := parseAddress(params.Address)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid address: "+err.Error(), -32602)
+		return
+	}
+
+	bocBytes, err := decodeBase64(params.BOC)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid base64 boc: "+err.Error(), -32602)
+		return
+	}
+	msgCell, err := cell.FromBOC(bocBytes)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid BOC: "+err.Error(), -32602)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
+	defer cancel()
+
+	block, err := b.api.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
+		return
+	}
+
+	acc, err := b.api.GetAccount(ctx, block, addr)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get account: "+err.Error())
+		return
+	}
+	if acc.Code == nil || acc.Data == nil {
+		b.sendError(client, req.ID, "account is not initialized, cannot emulate", -32602)
+		return
+	}
+
+	// EmulateTransaction needs the raw account cell to build the ShardAccount
+	// input; GetAccount only returns the parsed form, so fetch the cell directly.
+	var accResp tl.Serializable
+	if err = b.api.Client().QueryLiteserver(ctx, ton.GetAccountState{
+		ID:      block,
+		Account: ton.AccountID{Workchain: addr.Workchain(), ID: addr.Data()},
+	}, &accResp); err != nil {
+		b.sendError(client, req.ID, "failed to get account state: "+err.Error())
+		return
+	}
+	accState, ok := accResp.(ton.AccountState)
+	if !ok || accState.State == nil {
+		b.sendError(client, req.ID, "account state unavailable for emulation")
+		return
+	}
+
+	shard := &tlb.ShardAccount{
+		Account:       accState.State,
+		LastTransHash: acc.LastTxHash,
+		LastTransLT:   acc.LastTxLT,
+	}
+
+	bcCfg, err := b.api.GetBlockchainConfig(ctx, block)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
+		return
+	}
+
+	balance := big.NewInt(0)
+	if acc.State != nil && acc.State.IsValid {
+		balance = acc.State.Balance.Nano()
+	}
+
+	res, err := tvm.NewTVM().EmulateTransaction(shard, msgCell, tvm.TransactionEmulationConfig{
+		Address:    addr,
+		Now:        uint32(time.Now().Unix()),
+		Balance:    balance,
+		ConfigRoot: bcCfg.Root,
+		RandSeed:   make([]byte, 32),
+	})
+	if err != nil {
+		b.sendError(client, req.ID, "emulation failed: "+err.Error())
+		return
+	}
+
+	result := map[string]any{
+		"accepted":  res.Accepted,
+		"exit_code": res.ExitCode,
+		"gas_used":  res.GasUsed,
+	}
+	if res.Transaction != nil {
+		result["transaction"] = serializeTransaction(res.Transaction)
+		result["total_fees"] = res.Transaction.TotalFees.Coins.Nano().String()
+		summarizeTxPhases(res.Transaction, result)
+	}
+
+	b.sendResult(client, req.ID, result)
+}
+
+// summarizeTxPhases extracts a wallet-friendly fee breakdown and success flag
+// from an emulated ordinary transaction, writing them into out. It overrides
+// exit_code/gas_used with the authoritative compute-phase values. A non-ordinary
+// description (e.g. tick-tock) leaves out untouched.
+func summarizeTxPhases(tx *tlb.Transaction, out map[string]any) {
+	var desc tlb.TransactionDescriptionOrdinary
+	switch d := tx.Description.(type) {
+	case tlb.TransactionDescriptionOrdinary:
+		desc = d
+	case *tlb.TransactionDescriptionOrdinary:
+		desc = *d
+	default:
+		return
+	}
+
+	out["aborted"] = desc.Aborted
+
+	fees := map[string]any{"storage_fee": "0", "gas_fee": "0", "fwd_fee": "0", "action_fee": "0"}
+	if desc.StoragePhase != nil {
+		fees["storage_fee"] = desc.StoragePhase.StorageFeesCollected.Nano().String()
+	}
+
+	computeSuccess := false
+	switch cp := desc.ComputePhase.Phase.(type) {
+	case tlb.ComputePhaseVM:
+		computeSuccess = cp.Success
+		fees["gas_fee"] = cp.GasFees.Nano().String()
+		out["exit_code"] = cp.Details.ExitCode
+		if cp.Details.GasUsed != nil {
+			out["gas_used"] = cp.Details.GasUsed.String()
+		}
+	case tlb.ComputePhaseSkipped:
+		out["compute_skipped"] = string(cp.Reason.Type)
+	}
+
+	actionSuccess := true // no action phase = nothing to fail
+	if desc.ActionPhase != nil {
+		actionSuccess = desc.ActionPhase.Success
+		out["action_result_code"] = desc.ActionPhase.ResultCode
+		if desc.ActionPhase.TotalFwdFees != nil {
+			fees["fwd_fee"] = desc.ActionPhase.TotalFwdFees.Nano().String()
+		}
+		if desc.ActionPhase.TotalActionFees != nil {
+			fees["action_fee"] = desc.ActionPhase.TotalActionFees.Nano().String()
+		}
+	}
+
+	out["fees"] = fees
+	out["success"] = computeSuccess && actionSuccess && !desc.Aborted
+}
+
 // parseOutActions best-effort decodes a c5 action list (out_list) into a slice
 // of out-message descriptors, in send order. The raw actions BOC is returned
 // separately, so a partial or failed parse here loses no information.
