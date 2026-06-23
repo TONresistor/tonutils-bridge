@@ -1849,6 +1849,43 @@ func TestE2E_LiteSendReal(t *testing.T) {
 	t.Logf("[INFO] seqno=%d, uninit=%v", seqno, uninit)
 
 	// ---------------------------------------------------------------
+	// 2b. lite.emulateTransaction — preflight the exact BOC (no broadcast)
+	// ---------------------------------------------------------------
+	t.Run("emulateTransaction_real", func(t *testing.T) {
+		boc := buildTransferBOC(t, privKey, addr, seqno, uninit)
+		var resp e2eResponse
+		for i := 0; i < 5; i++ {
+			resp = e2eCall(t, c, "lite.emulateTransaction", map[string]string{
+				"address": addr.String(),
+				"boc":     boc,
+			})
+			if resp.Error == nil {
+				break
+			}
+			if resp.Error.Code == -32601 {
+				t.Fatalf("[FAIL] lite.emulateTransaction — method not found: %s", resp.Error.Message)
+			}
+			t.Logf("[RETRY %d/5] lite.emulateTransaction — %s", i+1, resp.Error.Message)
+			time.Sleep(2 * time.Second)
+		}
+		if resp.Error != nil {
+			t.Skipf("[SKIP] lite.emulateTransaction — unavailable (uninit wallet or liteserver): %s", resp.Error.Message)
+		}
+		result := e2eRequireResult(t, resp, "lite.emulateTransaction")
+		if _, ok := result["total_fees"]; !ok {
+			t.Fatal("[FAIL] lite.emulateTransaction — missing total_fees field")
+		}
+		fees, ok := result["fees"].(map[string]interface{})
+		if !ok {
+			t.Fatal("[FAIL] lite.emulateTransaction — missing fees breakdown")
+		}
+		accepted, _ := result["accepted"].(bool)
+		success, _ := result["success"].(bool)
+		t.Logf("[PASS] lite.emulateTransaction — accepted=%v success=%v total_fees=%v gas_fee=%v storage_fee=%v",
+			accepted, success, result["total_fees"], fees["gas_fee"], fees["storage_fee"])
+	})
+
+	// ---------------------------------------------------------------
 	// 3. lite.sendMessage — fire and forget
 	// ---------------------------------------------------------------
 	t.Run("sendMessage_real", func(t *testing.T) {
