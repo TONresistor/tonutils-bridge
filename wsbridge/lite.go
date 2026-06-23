@@ -439,10 +439,14 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		return
 	}
 
+	// success defaults to false (e.g. a rejected external produces no transaction
+	// and no fees); summarizeTxPhases overrides it when a transaction is produced.
 	result := map[string]any{
-		"accepted":  res.Accepted,
-		"exit_code": res.ExitCode,
-		"gas_used":  res.GasUsed,
+		"accepted":   res.Accepted,
+		"success":    false,
+		"exit_code":  res.ExitCode,
+		"gas_used":   res.GasUsed,
+		"total_fees": "0",
 	}
 	if res.Transaction != nil {
 		result["transaction"] = serializeTransaction(res.Transaction)
