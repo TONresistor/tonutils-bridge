@@ -100,7 +100,7 @@ Each namespace can be disabled (`enabled: false`) and given its own `timeout`. C
 
 > **Invariant:** keep `websocket.max_inflight > namespaces.subscribe.max_subscriptions`. Each active subscription holds one in-flight request slot for its whole lifetime, so if the two are equal a client that maxes out its subscriptions can no longer issue `subscribe.unsubscribe`. The bridge rejects configs that violate this at startup.
 
-## Methods (64)
+## Methods (65)
 
 ### Subscriptions - Real-Time Push (8)
 
@@ -156,7 +156,7 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 
 `dht.storeAddress` and `dht.storeOverlayNodes` are **disabled by default** (they publish records signed by the bridge's persistent ADNL key, which would let a client hijack the bridge identity in the DHT). When disabled, any call returns error -32603. Enable them by setting `namespaces.dht.allow_write: true` in `config.json`. The `replicas` param is accepted for wire compatibility but ignored (tonutils-go v1.17+ internalizes DHT replication).
 
-### Lite - Blockchain Queries (19)
+### Lite - Blockchain Queries (20)
 
 | Method | Params | Response | Timeout |
 |--------|--------|----------|---------|
@@ -164,6 +164,7 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | `lite.getAccountState` | `address` | `{balance, status, last_tx_lt, last_tx_hash, has_code, has_data, code?, data?}` | 10s |
 | `lite.runMethod` | `address`, `method`, `params[]` | `{exit_code, stack[]}` (`exit_code` is always `0` on success; non-0/1 codes surface as an error) | 10s |
 | `lite.emulateMessage` | `address`, `boc` (base64), `type` (`external` default \| `internal`), `amount` (nano-TON, required when `type=internal`) | `{accepted, exit_code, gas_used, steps, committed, new_data?, actions?, out_messages[]}` | 10s |
+| `lite.emulateTransaction` | `address`, `boc` (base64, full message cell) | `{accepted, success, exit_code, gas_used, total_fees, fees: {storage_fee, gas_fee, fwd_fee, action_fee}, aborted, action_result_code?, compute_skipped?, transaction}` | 10s |
 | `lite.sendMessage` | `boc` (base64) | `{hash, status}` | 10s |
 | `lite.sendMessageWait` | `boc` (base64) | `{hash, status}` (longer liteserver timeout; does NOT wait for on-chain confirmation) | 60s |
 | `lite.getTransactions` | `address`, `limit`, `last_lt?`, `last_hash?` | `{transactions}` | 10s |
@@ -181,6 +182,8 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | `lite.sendAndWatch` | `boc` (base64) | `{watching, subscription_id, msg_hash}` then push events | 180s |
 
 `lite.emulateMessage` runs the message locally against the account's real on-chain state using the native Go TVM (no broadcast) — a dry-run before `lite.sendMessage`. The TVM emulator is alpha upstream; results may differ from real on-chain execution in edge cases. The account must be initialized.
+
+`lite.emulateTransaction` goes further: it runs the **full transaction** (storage + credit + compute + action phases), so it reports `total_fees` and a per-phase `fees` breakdown plus `success`/`aborted` — the preflight a wallet needs to show fees and "will it succeed" before signing. `boc` must be a full message cell (the same external-in BOC passed to `lite.sendMessage`). Same alpha caveat; account must be initialized.
 
 ### Jetton (3)
 
@@ -294,7 +297,7 @@ tonutils-bridge
     adnl.go         9 ADNL P2P methods + disconnect/query handlers
     overlay.go      7 overlay methods + broadcast/query handlers
     dht.go          4 DHT find methods + 2 disabled store methods
-    lite.go         19 liteserver query methods (incl. emulateMessage, local TVM)
+    lite.go         20 liteserver query methods (incl. emulate Message/Transaction, local TVM)
     dns.go          DNS resolution
     jetton.go       Jetton metadata
     nft.go          NFT metadata
