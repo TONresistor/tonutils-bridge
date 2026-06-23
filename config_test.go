@@ -151,6 +151,33 @@ func TestConfig_Validate_ValidConfig(t *testing.T) {
 	}
 }
 
+func TestConfig_Validate_InflightVsSubscriptions(t *testing.T) {
+	// max_inflight must be strictly greater than max_subscriptions, otherwise a
+	// client maxing out subscriptions can lock itself out of subscribe.unsubscribe.
+	cfg := DefaultConfig()
+	cfg.WebSocket.MaxInflight = cfg.Namespaces.Subscribe.MaxSubscriptions
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error when max_inflight == max_subscriptions")
+	}
+
+	cfg.WebSocket.MaxInflight = cfg.Namespaces.Subscribe.MaxSubscriptions - 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error when max_inflight < max_subscriptions")
+	}
+
+	cfg.WebSocket.MaxInflight = cfg.Namespaces.Subscribe.MaxSubscriptions + 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config when max_inflight > max_subscriptions: %v", err)
+	}
+
+	// The invariant is skipped entirely when the subscribe namespace is disabled.
+	cfg.WebSocket.MaxInflight = 1
+	cfg.Namespaces.Subscribe.Enabled = boolPtr(false)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("invariant should not apply when subscribe is disabled: %v", err)
+	}
+}
+
 func TestConfig_ToWSBridgeConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	_, priv, _ := ed25519.GenerateKey(nil)

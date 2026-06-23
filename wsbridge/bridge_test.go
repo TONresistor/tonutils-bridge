@@ -588,10 +588,14 @@ func TestWSBridge_DHTAllowWrite(t *testing.T) {
 
 	resp = rpc(t, conn2, "2", "dht.storeAddress", nil)
 	if resp.Error == nil {
-		t.Fatal("expected error (not implemented)")
+		t.Fatal("expected error (nil params)")
 	}
-	// Should get "not yet implemented" instead of "disabled"
+	// With allow_write=true the gate is passed; the handler proceeds to param
+	// parsing and fails there on nil params (-32602), NOT on the disabled gate.
 	if strings.Contains(resp.Error.Message, "disabled") {
-		t.Fatalf("expected 'not yet implemented', got: %s", resp.Error.Message)
+		t.Fatalf("gate should be open with allow_write=true, got: %s", resp.Error.Message)
+	}
+	if resp.Error.Code != -32602 {
+		t.Fatalf("expected -32602 (invalid params) past the gate, got %d (%s)", resp.Error.Code, resp.Error.Message)
 	}
 }
