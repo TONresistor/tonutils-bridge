@@ -543,7 +543,7 @@ func (b *WSBridge) handleADNLSetQueryHandler(client *wsClient, req *WSRequest) {
 		}
 
 		b.pendingQueriesMu.Lock()
-		b.pendingQueries[queryID] = pendingQuery{peer: peer, deadline: time.Now().Add(30 * time.Second)}
+		b.pendingQueries[queryID] = pendingQuery{peer: peer, deadline: time.Now().Add(maxPendingQueryTTL)}
 		b.pendingQueriesMu.Unlock()
 
 		b.sendEvent(client, "adnl.queryReceived", map[string]interface{}{

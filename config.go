@@ -355,6 +355,13 @@ func (c *Config) Validate() error {
 	if c.Namespaces.Subscribe.IsEnabled() && c.Namespaces.Subscribe.MaxSubscriptions < 1 {
 		return fmt.Errorf("namespaces.subscribe.max_subscriptions must be >= 1, got %d", c.Namespaces.Subscribe.MaxSubscriptions)
 	}
+	// Each active subscription handler holds one in-flight request slot for its
+	// whole lifetime. If max_inflight <= max_subscriptions a client that maxes
+	// out its subscriptions can exhaust the in-flight semaphore and lock itself
+	// out of control requests like subscribe.unsubscribe. Require strict headroom.
+	if c.Namespaces.Subscribe.IsEnabled() && c.WebSocket.MaxInflight <= c.Namespaces.Subscribe.MaxSubscriptions {
+		return fmt.Errorf("websocket.max_inflight (%d) must be > namespaces.subscribe.max_subscriptions (%d): subscriptions hold in-flight slots, so equal values can deadlock subscribe.unsubscribe", c.WebSocket.MaxInflight, c.Namespaces.Subscribe.MaxSubscriptions)
+	}
 	if c.Namespaces.ADNL.IsEnabled() && c.Namespaces.ADNL.MaxPeers < 1 {
 		return fmt.Errorf("namespaces.adnl.max_peers must be >= 1, got %d", c.Namespaces.ADNL.MaxPeers)
 	}

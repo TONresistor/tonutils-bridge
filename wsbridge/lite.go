@@ -1068,9 +1068,10 @@ func (b *WSBridge) handleGetLibraries(client *wsClient, req *WSRequest) {
 
 func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 	// 1. Count as a subscription (uses the same atomic limit)
-	if atomic.AddInt32(&client.activeSubs, 1) > 50 {
+	maxSubs := int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions)
+	if atomic.AddInt32(&client.activeSubs, 1) > maxSubs {
 		atomic.AddInt32(&client.activeSubs, -1)
-		b.sendError(client, req.ID, "too many subscriptions (max 50)", -32602)
+		b.sendError(client, req.ID, fmt.Sprintf("too many subscriptions (max %d)", maxSubs), -32602)
 		return
 	}
 	defer atomic.AddInt32(&client.activeSubs, -1)
