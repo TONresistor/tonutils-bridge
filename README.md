@@ -53,9 +53,11 @@ Push event (no request ID):
 
 Error codes: -32700 parse error, -32601 method not found, -32602 invalid params, -32603 internal error.
 
-Origin restricted to `127.0.0.1`, `localhost`, and `::1`. Max message size 1 MB. Ping/pong keepalive (54s/60s).
+Origin restricted to `127.0.0.1`, `localhost`, and `::1`. Max message size 1 MB. Ping/pong keepalive (54s/60s). All of these are defaults — see [Configuration](#configuration).
 
 ### Limits
+
+The values below are defaults; every one is tunable via `config.json` (see [Configuration](#configuration)).
 
 | Limit | Value |
 |-------|-------|
@@ -70,9 +72,35 @@ Origin restricted to `127.0.0.1`, `localhost`, and `::1`. Max message size 1 MB.
 
 ### SSRF Protection
 
-`adnl.connect` and `adnl.connectByADNL` reject private, loopback, and reserved IP addresses.
+`adnl.connect` and `adnl.connectByADNL` reject private, loopback, and reserved IP addresses. Toggle with `namespaces.adnl.ssrf_protection` in `config.json` (on by default).
 
-## Methods (63)
+## Configuration
+
+On first launch the bridge writes a `config.json` (v2 schema) into `--data-dir`, containing the persistent ADNL key and all tunable settings. CLI flags (`--addr`, `--config`, `--tunnel`, `--verbosity`) override the corresponding config fields at startup. v1 config files (key + version only) are migrated to v2 automatically; missing fields are filled with defaults and re-saved.
+
+Top-level keys:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `listen` | `127.0.0.1:8081` | WebSocket listen address |
+| `max_clients` | `100` | Max concurrent WS connections |
+| `allowed_origins` | `["127.0.0.1", "localhost", "::1"]` | Permitted `Origin` hosts (`"*"` allows any; requests with no `Origin` header are always allowed) |
+| `api_key` | `""` (disabled) | When set, clients must pass `?api_key=<key>` on the WS URL or get HTTP 401 |
+| `websocket` | | `{write_timeout, pong_deadline, max_inflight, max_message_size}` |
+| `namespaces` | | Per-namespace settings (see below) |
+
+Each namespace can be disabled (`enabled: false`) and given its own `timeout`. Calls to a disabled namespace return error -32601 (method not found). Notable per-namespace knobs:
+
+- `lite`: `timeout`, `send_wait_timeout`, `watch_timeout`
+- `subscribe`: `max_subscriptions`, `max_multi_accounts`, `max_config_params`
+- `subscribe_trace`: `max_depth`, `default_depth`, `max_msg_timeout`, `default_msg_timeout`, `max_resolvers`
+- `adnl`: `max_peers`, `query_max_timeout`, `ssrf_protection`
+- `overlay`: `max_overlays`, `query_max_timeout`
+- `dht`: `tunnel_timeout`, `allow_write` (enables the `dht.store*` methods)
+
+> **Invariant:** keep `websocket.max_inflight > namespaces.subscribe.max_subscriptions`. Each active subscription holds one in-flight request slot for its whole lifetime, so if the two are equal a client that maxes out its subscriptions can no longer issue `subscribe.unsubscribe`. The bridge rejects configs that violate this at startup.
+
+## Methods (64)
 
 ### Subscriptions - Real-Time Push (8)
 
@@ -123,21 +151,22 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | `dht.findOverlayNodes` | `overlay_key` (base64) | `{nodes: [{id, overlay, version}], count}` | 15s |
 | `dht.findTunnelNodes` | | `{relays: [{adnl_id, version}], count}` | 30s |
 | `dht.findValue` | `key_id` (base64), `name`, `index` | `{data: "base64", ttl}` | 15s |
-| `dht.storeAddress` | disabled | returns error -32603 | - |
-| `dht.storeOverlayNodes` | disabled | returns error -32603 | - |
+| `dht.storeAddress` | `addresses[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key}` | 15s |
+| `dht.storeOverlayNodes` | `overlay_key`, `nodes[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key}` | 15s |
 
-`dht.storeAddress` and `dht.storeOverlayNodes` are disabled to prevent DHT identity hijacking. Any call returns error -32603.
+`dht.storeAddress` and `dht.storeOverlayNodes` are **disabled by default** (they publish records signed by the bridge's persistent ADNL key, which would let a client hijack the bridge identity in the DHT). When disabled, any call returns error -32603. Enable them by setting `namespaces.dht.allow_write: true` in `config.json`. The `replicas` param is accepted for wire compatibility but ignored (tonutils-go v1.17+ internalizes DHT replication).
 
-### Lite - Blockchain Queries (18)
+### Lite - Blockchain Queries (19)
 
 | Method | Params | Response | Timeout |
 |--------|--------|----------|---------|
 | `lite.getMasterchainInfo` | | `{seqno, workchain, shard, root_hash, file_hash}` | 10s |
 | `lite.getAccountState` | `address` | `{balance, status, last_tx_lt, last_tx_hash, has_code, has_data, code?, data?}` | 10s |
-| `lite.runMethod` | `address`, `method`, `params[]` | `{exit_code, stack[]}` | 10s |
+| `lite.runMethod` | `address`, `method`, `params[]` | `{exit_code, stack[]}` (`exit_code` is always `0` on success; non-0/1 codes surface as an error) | 10s |
+| `lite.emulateMessage` | `address`, `boc` (base64), `type` (`external` default \| `internal`), `amount` (nano-TON, required when `type=internal`) | `{accepted, exit_code, gas_used, steps, committed, new_data?, actions?, out_messages[]}` | 10s |
 | `lite.sendMessage` | `boc` (base64) | `{hash, status}` | 10s |
-| `lite.sendMessageWait` | `boc` (base64) | `{hash, status}` | 60s |
-| `lite.getTransactions` | `address`, `limit`, `last_lt?`, `last_hash?` | `{transactions, incomplete}` | 10s |
+| `lite.sendMessageWait` | `boc` (base64) | `{hash, status}` (longer liteserver timeout; does NOT wait for on-chain confirmation) | 60s |
+| `lite.getTransactions` | `address`, `limit`, `last_lt?`, `last_hash?` | `{transactions}` | 10s |
 | `lite.getTransaction` | `address`, `lt` | serialized transaction | 10s |
 | `lite.findTxByInMsgHash` | `address`, `msg_hash` (hex) | serialized transaction | 10s |
 | `lite.findTxByOutMsgHash` | `address`, `msg_hash` (hex) | serialized transaction | 10s |
@@ -150,6 +179,8 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | `lite.getBlockHeader` | `workchain`, `shard`, `seqno` | `{workchain, shard, seqno, root_hash, file_hash, header_boc}` | 10s |
 | `lite.getLibraries` | `hashes[]` (hex) | `{libraries: [{hash, boc} or null]}` | 10s |
 | `lite.sendAndWatch` | `boc` (base64) | `{watching, subscription_id, msg_hash}` then push events | 180s |
+
+`lite.emulateMessage` runs the message locally against the account's real on-chain state using the native Go TVM (no broadcast) — a dry-run before `lite.sendMessage`. The TVM emulator is alpha upstream; results may differ from real on-chain execution in edge cases. The account must be initialized.
 
 ### Jetton (3)
 
@@ -193,7 +224,7 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 
 | Method | Params | Response |
 |--------|--------|----------|
-| `payment.getChannelState` | `address` | `{status, initialized, balance_a, balance_b, key_a, key_b, channel_id, committed_seqno_a, committed_seqno_b, quarantine, closing_config}` |
+| `payment.getChannelState` | `address` | `{status, is_a, initialized, committed_seqno, wallet_seqno, key_a, key_b, channel_id, party_address, closing_config: {quarantine_duration, conditional_close_duration, actions_duration, replication_message_attach_amount}, quarantine}` |
 
 ### Network (1)
 
@@ -255,7 +286,7 @@ WS_ADDR=ws://127.0.0.1:9090 go test -tags e2e -v ./wsbridge/
 ```
 tonutils-bridge
   main.go           Bootstrap: config, liteserver pool, DHT, ADNL gateway, tunnel
-  config.go         Persistent ADNL identity (ed25519 key in config.json)
+  config.go         Persistent config.json: ADNL identity (ed25519) + all tunable settings, v1->v2 migration
   wsbridge/
     bridge.go       Core: WS lifecycle, dispatcher, sendEvent, limits
     subscribe.go    8 subscription methods (real-time push)
@@ -263,7 +294,7 @@ tonutils-bridge
     adnl.go         9 ADNL P2P methods + disconnect/query handlers
     overlay.go      7 overlay methods + broadcast/query handlers
     dht.go          4 DHT find methods + 2 disabled store methods
-    lite.go         18 liteserver query methods
+    lite.go         19 liteserver query methods (incl. emulateMessage, local TVM)
     dns.go          DNS resolution
     jetton.go       Jetton metadata
     nft.go          NFT metadata
