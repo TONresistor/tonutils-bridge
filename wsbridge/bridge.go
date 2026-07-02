@@ -473,6 +473,8 @@ func (b *WSBridge) handleRequest(client *wsClient, req *WSRequest) {
 		b.handleOverlayGetPeers(client, req)
 	case "overlay.sendMessage":
 		b.handleOverlaySendMessage(client, req)
+	case "overlay.broadcast":
+		b.handleOverlayBroadcast(client, req)
 	case "dht.findValue":
 		b.handleDHTFindValue(client, req)
 	case "dht.storeAddress":

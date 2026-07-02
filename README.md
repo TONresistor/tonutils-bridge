@@ -100,7 +100,7 @@ Each namespace can be disabled (`enabled: false`) and given its own `timeout`. C
 
 > **Invariant:** keep `websocket.max_inflight > namespaces.subscribe.max_subscriptions`. Each active subscription holds one in-flight request slot for its whole lifetime, so if the two are equal a client that maxes out its subscriptions can no longer issue `subscribe.unsubscribe`. The bridge rejects configs that violate this at startup.
 
-## Methods (65)
+## Methods (66)
 
 ### Subscriptions - Real-Time Push (8)
 
@@ -131,17 +131,20 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | `adnl.setQueryHandler` | `peer_id` | `{enabled}` then push `adnl.queryReceived` events |
 | `adnl.answer` | `query_id` (hex), `data` (base64) | `{answered}` |
 
-### Overlay - Network Overlays (7)
+### Overlay - Network Overlays (8)
 
 | Method | Params | Response |
 |--------|--------|----------|
-| `overlay.join` | `overlay_id`, `peer_id` (base64) | `{joined, overlay_id}` |
+| `overlay.join` | `overlay_id`, `peer_id` (base64) | `{joined, overlay_id}` then push `overlay.broadcast` / `overlay.message` events |
 | `overlay.leave` | `overlay_id` | `{left}` |
 | `overlay.getPeers` | `overlay_id` | `{peers: [{id, overlay}]}` |
-| `overlay.sendMessage` | `overlay_id`, `data` (base64) | `{sent}` |
+| `overlay.sendMessage` | `overlay_id`, `data` (base64) | `{sent}` — unicast to the joined peer |
+| `overlay.broadcast` | `overlay_id`, `data` (base64, ≤1 MiB) | `{broadcast_id}` — signed FEC fan-out to the whole overlay |
 | `overlay.query` | `overlay_id`, `data` (base64), `timeout` | `{data: "base64"}` |
 | `overlay.setQueryHandler` | `overlay_id`, `peer_id` | `{enabled}` then push `overlay.queryReceived` events |
 | `overlay.answer` | `query_id` (hex), `data` (base64) | `{answered}` |
+
+Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` events: `{overlay_id, message (base64 ws.rawMessage), trusted}`. A sender does not receive an echo of its own broadcast.
 
 ### DHT - Distributed Hash Table (6)
 

@@ -2,6 +2,7 @@ package wsbridge
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -383,6 +384,46 @@ func TestWSBridge_ErrorCode32602(t *testing.T) {
 		if resp.Error.Code != -32602 {
 			t.Errorf("%s: expected code -32602, got %d (%s)", tc.method, resp.Error.Code, resp.Error.Message)
 		}
+	}
+}
+
+// TestWSBridge_OverlayBroadcast_Validation exercises overlay.broadcast without a
+// live network: it must be a registered method (never -32601) and must reject bad
+// input with -32602 before touching the overlay/DHT layer.
+func TestWSBridge_OverlayBroadcast_Validation(t *testing.T) {
+	bridge := testBridge()
+	conn, cleanup := dialTestBridge(t, bridge)
+	defer cleanup()
+
+	validOverlay := base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	cases := []struct {
+		name       string
+		params     interface{}
+		wantSubstr string
+	}{
+		{"not_joined", map[string]string{"overlay_id": validOverlay, "data": "aGk="}, "overlay not found"},
+		{"empty_data", map[string]string{"overlay_id": validOverlay, "data": ""}, "data is empty"},
+		{"bad_overlay_b64", map[string]string{"overlay_id": "!!!notb64", "data": "aGk="}, "invalid base64 overlay_id"},
+		{"bad_data_b64", map[string]string{"overlay_id": validOverlay, "data": "!!!notb64"}, "invalid base64 data"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := rpc(t, conn, "1", "overlay.broadcast", tc.params)
+			if resp.Error == nil {
+				t.Fatalf("expected error, got result: %v", resp.Result)
+			}
+			if resp.Error.Code == -32601 {
+				t.Fatalf("overlay.broadcast is not registered (unknown method): %s", resp.Error.Message)
+			}
+			if resp.Error.Code != -32602 {
+				t.Fatalf("expected code -32602, got %d (%s)", resp.Error.Code, resp.Error.Message)
+			}
+			if !strings.Contains(resp.Error.Message, tc.wantSubstr) {
+				t.Fatalf("expected message to contain %q, got %q", tc.wantSubstr, resp.Error.Message)
+			}
+		})
 	}
 }
 

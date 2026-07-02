@@ -15,6 +15,10 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 )
 
+// maxOverlayBroadcastSize bounds the payload accepted by overlay.broadcast to
+// protect the node from oversized fan-out requests coming over the local API.
+const maxOverlayBroadcastSize = 1 << 20 // 1 MiB
+
 // clientOwnsOverlay checks if the given overlay hex ID belongs to this client.
 func clientOwnsOverlay(client *wsClient, overlayHex string) bool {
 	client.peersMu.Lock()
@@ -309,6 +313,94 @@ func (b *WSBridge) handleOverlaySendMessage(client *wsClient, req *WSRequest) {
 
 	b.sendResult(client, req.ID, map[string]interface{}{
 		"sent": true,
+	})
+}
+
+// handleOverlayBroadcast fans a signed message out to the ENTIRE overlay using
+// TON's FEC broadcast, unlike overlay.sendMessage which unicasts to the single
+// joined peer. The payload is signed with the bridge node key (b.key), wrapped
+// as a ws.rawMessage TL object, and pumped as RaptorQ repair symbols to the
+// overlay peer set; neighbours re-gossip it so it reaches every member.
+//
+// Receiving nodes surface it through the broadcast handler installed in
+// handleOverlayJoin, i.e. as an "overlay.broadcast" push event carrying the same
+// ws.rawMessage. The sender does NOT receive an echo of its own broadcast, so a
+// UI should optimistically render locally-sent messages.
+func (b *WSBridge) handleOverlayBroadcast(client *wsClient, req *WSRequest) {
+	var params struct {
+		OverlayID string `json:"overlay_id"` // base64
+		Data      string `json:"data"`       // base64 payload
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
+		return
+	}
+
+	overlayID, err := decodeBase64(params.OverlayID)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid base64 overlay_id: "+err.Error(), -32602)
+		return
+	}
+
+	data, err := decodeBase64(params.Data)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid base64 data: "+err.Error(), -32602)
+		return
+	}
+	if len(data) == 0 {
+		b.sendError(client, req.ID, "data is empty", -32602)
+		return
+	}
+	if len(data) > maxOverlayBroadcastSize {
+		b.sendError(client, req.ID, fmt.Sprintf("data too large (%d bytes, max %d)", len(data), maxOverlayBroadcastSize), -32602)
+		return
+	}
+
+	overlayHex := hex.EncodeToString(overlayID)
+
+	b.activeOverlaysMu.RLock()
+	ow, ok := b.activeOverlays[overlayHex]
+	b.activeOverlaysMu.RUnlock()
+	if !ok {
+		b.sendError(client, req.ID, "overlay not found — join first via overlay.join", -32602)
+		return
+	}
+
+	if !clientOwnsOverlay(client, overlayHex) {
+		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
+		return
+	}
+
+	// Wrap in ws.rawMessage so receivers (which tl.Parse the reassembled payload)
+	// decode it symmetrically with the overlay.sendMessage / overlay.message path.
+	sender, err := overlay.NewBroadcastFECSenderFromTL(
+		b.key,
+		overlay.CertificateEmpty{},
+		RawMessage{Data: data},
+		overlay.BroadcastFlagAnySender,
+	)
+	if err != nil {
+		b.sendError(client, req.ID, "broadcast init failed: "+err.Error())
+		return
+	}
+
+	broadcaster, err := overlay.NewBroadcastFECBroadcaster(sender, overlay.StaticBroadcastPeerSet{ow})
+	if err != nil {
+		b.sendError(client, req.ID, "broadcaster init failed: "+err.Error())
+		return
+	}
+
+	// Run() pumps repair symbols until neighbours acknowledge or the broadcast
+	// TTL (~60s) elapses; it is blocking, so drive it in the background on the
+	// connection-scoped context and return the broadcast id immediately.
+	go func() {
+		if err := broadcaster.Run(client.ctx); err != nil && client.ctx.Err() == nil {
+			log.Warn().Err(err).Str("overlay", overlayHex).Msg("overlay broadcast run ended with error")
+		}
+	}()
+
+	b.sendResult(client, req.ID, map[string]interface{}{
+		"broadcast_id": hex.EncodeToString(sender.BroadcastHash()),
 	})
 }
 

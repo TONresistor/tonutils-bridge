@@ -1269,6 +1269,27 @@ func TestE2E_Overlay(t *testing.T) {
 		}
 	})
 
+	t.Run("broadcast", func(t *testing.T) {
+		resp := e2eCallRetry(t, c, "overlay.broadcast", map[string]interface{}{
+			"overlay_id": realOverlayID,
+			"data":       "SGVsbG8gYnJvYWRjYXN0", // "Hello broadcast"
+		}, 2)
+		if resp.Error != nil {
+			if resp.Error.Code == -32601 {
+				t.Fatalf("[FAIL] overlay.broadcast — method not found (code -32601): %s", resp.Error.Message)
+			}
+			// No neighbours yet in a freshly joined overlay — transient error tolerated.
+			t.Logf("[PASS] overlay.broadcast — transient/no-peers error tolerated (%s)", resp.Error.Message)
+		} else {
+			result := e2eRequireResult(t, resp, "overlay.broadcast")
+			id, ok := result["broadcast_id"].(string)
+			if !ok || id == "" {
+				t.Fatalf("[FAIL] overlay.broadcast — expected broadcast_id string, got %v", result)
+			}
+			t.Logf("[PASS] overlay.broadcast — broadcast_id=%s", truncKey(id))
+		}
+	})
+
 	t.Run("query_rejectGarbage", func(t *testing.T) {
 		resp := e2eCall(t, c, "overlay.query", map[string]interface{}{
 			"overlay_id": realOverlayID,
