@@ -316,14 +316,15 @@ func (b *WSBridge) handleOverlaySendMessage(client *wsClient, req *WSRequest) {
 	})
 }
 
-// handleOverlaySendRaw sends a pre-serialized custom message verbatim, without
-// wrapping it in ws.rawMessage. The client is responsible for the full TL
-// framing (e.g. a tonnet.broadcast). Used by the tonnet chat protocol v0.2,
-// whose wire unit is a client-signed broadcast the bridge must not re-wrap.
+// handleOverlaySendRaw sends a client-built custom message (a full TL object
+// such as a tonnet.broadcast) without wrapping it in ws.rawMessage. The bytes
+// are parsed back into their registered TL type and re-sent, so the message
+// travels under its own constructor rather than ws.rawMessage. Used by the
+// tonnet chat protocol v0.2, whose wire unit is a client-signed broadcast.
 func (b *WSBridge) handleOverlaySendRaw(client *wsClient, req *WSRequest) {
 	var params struct {
 		OverlayID string `json:"overlay_id"` // base64
-		Data      string `json:"data"`       // base64 of the full TL custom-message payload
+		Data      string `json:"data"`       // base64 of the boxed TL object (e.g. tonnet.broadcast)
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
@@ -357,10 +358,16 @@ func (b *WSBridge) handleOverlaySendRaw(client *wsClient, req *WSRequest) {
 		return
 	}
 
+	var obj any
+	if _, err := tl.Parse(&obj, data, true); err != nil {
+		b.sendError(client, req.ID, "invalid tonnet broadcast payload: "+err.Error(), -32602)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Overlay.Timeout)
 	defer cancel()
 
-	if err := ow.SendCustomMessage(ctx, tl.Raw(data)); err != nil {
+	if err := ow.SendCustomMessage(ctx, obj); err != nil {
 		b.sendError(client, req.ID, "send failed: "+err.Error())
 		return
 	}
