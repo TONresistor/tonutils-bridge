@@ -316,6 +316,60 @@ func (b *WSBridge) handleOverlaySendMessage(client *wsClient, req *WSRequest) {
 	})
 }
 
+// handleOverlaySendRaw sends a pre-serialized custom message verbatim, without
+// wrapping it in ws.rawMessage. The client is responsible for the full TL
+// framing (e.g. a tonnet.broadcast). Used by the tonnet chat protocol v0.2,
+// whose wire unit is a client-signed broadcast the bridge must not re-wrap.
+func (b *WSBridge) handleOverlaySendRaw(client *wsClient, req *WSRequest) {
+	var params struct {
+		OverlayID string `json:"overlay_id"` // base64
+		Data      string `json:"data"`       // base64 of the full TL custom-message payload
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
+		return
+	}
+
+	overlayID, err := decodeBase64(params.OverlayID)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid base64 overlay_id: "+err.Error(), -32602)
+		return
+	}
+
+	data, err := decodeBase64(params.Data)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid base64 data: "+err.Error(), -32602)
+		return
+	}
+
+	overlayHex := hex.EncodeToString(overlayID)
+
+	b.activeOverlaysMu.RLock()
+	ow, ok := b.activeOverlays[overlayHex]
+	b.activeOverlaysMu.RUnlock()
+	if !ok {
+		b.sendError(client, req.ID, "overlay not found — join first via overlay.join", -32602)
+		return
+	}
+
+	if !clientOwnsOverlay(client, overlayHex) {
+		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Overlay.Timeout)
+	defer cancel()
+
+	if err := ow.SendCustomMessage(ctx, tl.Raw(data)); err != nil {
+		b.sendError(client, req.ID, "send failed: "+err.Error())
+		return
+	}
+
+	b.sendResult(client, req.ID, map[string]interface{}{
+		"sent": true,
+	})
+}
+
 // handleOverlayBroadcast fans a signed message out to the ENTIRE overlay using
 // TON's FEC broadcast, unlike overlay.sendMessage which unicasts to the single
 // joined peer. The payload is signed with the bridge node key (b.key), wrapped

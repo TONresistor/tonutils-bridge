@@ -33,6 +33,20 @@ type RawMessage struct {
 	Data []byte `tl:"bytes"`
 }
 
+// TonnetBroadcast is the signed broadcast wrapper of the tonnet chat protocol
+// v0.2. The bridge neither originates nor verifies it: clients build the bytes
+// and send them via overlay.sendRaw, and inbound frames are forwarded verbatim.
+// It is registered only so tonutils-go can parse an inbound custom message of
+// this constructor and the default forward path can re-serialize it.
+type TonnetBroadcast struct {
+	Src         any    `tl:"struct boxed [pub.ed25519]"`
+	Certificate any    `tl:"struct boxed [overlay.emptyCertificate,overlay.certificate,overlay.certificateV2]"`
+	Flags       int32  `tl:"int"`
+	Data        []byte `tl:"bytes"`
+	Date        int32  `tl:"int"`
+	Signature   []byte `tl:"bytes"`
+}
+
 // OverlayKey matches adnlTunnel.overlayKey from adnl-tunnel
 type OverlayKey struct {
 	PaymentNode []byte `tl:"int256"`
@@ -40,6 +54,7 @@ type OverlayKey struct {
 
 func init() {
 	tl.Register(RawMessage{}, "ws.rawMessage data:bytes = ws.RawMessage")
+	tl.Register(TonnetBroadcast{}, "tonnet.broadcast src:PublicKey certificate:overlay.Certificate flags:int data:bytes date:int signature:bytes = tonnet.Broadcast")
 }
 
 // RegisterOverlayKey registers the OverlayKey TL type. Call this only when
@@ -473,6 +488,8 @@ func (b *WSBridge) handleRequest(client *wsClient, req *WSRequest) {
 		b.handleOverlayGetPeers(client, req)
 	case "overlay.sendMessage":
 		b.handleOverlaySendMessage(client, req)
+	case "overlay.sendRaw":
+		b.handleOverlaySendRaw(client, req)
 	case "overlay.broadcast":
 		b.handleOverlayBroadcast(client, req)
 	case "dht.findValue":
