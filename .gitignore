@@ -8,3 +8,6 @@ tonutils-bridge
 .env
 config.json
 wsbridge/testdata/.wallet.json
+result
+.kilo
+.direnv
