@@ -281,6 +281,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
 		return
 	}
+	preparedCfg, err := tvm.PrepareBlockchainConfig(bcCfg.Root)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare blockchain config: "+err.Error())
+		return
+	}
 
 	balance := big.NewInt(0)
 	if acc.State != nil && acc.State.IsValid {
@@ -288,11 +293,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 	}
 
 	emCfg := tvm.MessageEmulationConfig{
-		Address:    addr,
-		Now:        uint32(time.Now().Unix()),
-		Balance:    balance,
-		ConfigRoot: bcCfg.Root,
-		RandSeed:   make([]byte, 32),
+		Address:  addr,
+		Now:      uint32(time.Now().Unix()),
+		Balance:  balance,
+		Config:   preparedCfg,
+		RandSeed: make([]byte, 32),
 	}
 
 	machine := tvm.NewTVM()
@@ -421,19 +426,31 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
 		return
 	}
-
-	balance := big.NewInt(0)
-	if acc.State != nil && acc.State.IsValid {
-		balance = acc.State.Balance.Nano()
+	preparedCfg, err := tvm.PrepareBlockchainConfig(bcCfg.Root)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare blockchain config: "+err.Error())
+		return
+	}
+	blockCtx, err := preparedCfg.NewBlockContext(tvm.BlockOptions{
+		Now:      uint32(time.Now().Unix()),
+		RandSeed: make([]byte, 32),
+	})
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare block context: "+err.Error())
+		return
+	}
+	preparedAccount, err := tvm.PrepareAccount(shard, addr)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare account: "+err.Error())
+		return
+	}
+	preparedMessage, err := tvm.PrepareMessage(msgCell)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare message: "+err.Error(), -32602)
+		return
 	}
 
-	res, err := tvm.NewTVM().EmulateTransaction(shard, msgCell, tvm.TransactionEmulationConfig{
-		Address:    addr,
-		Now:        uint32(time.Now().Unix()),
-		Balance:    balance,
-		ConfigRoot: bcCfg.Root,
-		RandSeed:   make([]byte, 32),
-	})
+	res, err := tvm.NewTVM().EmulateTransaction(blockCtx, preparedAccount, preparedMessage, tvm.TransactionOptions{})
 	if err != nil {
 		b.sendError(client, req.ID, "emulation failed: "+err.Error())
 		return
@@ -448,10 +465,15 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		"gas_used":   res.GasUsed,
 		"total_fees": "0",
 	}
-	if res.Transaction != nil {
-		result["transaction"] = serializeTransaction(res.Transaction)
-		result["total_fees"] = res.Transaction.TotalFees.Coins.Nano().String()
-		summarizeTxPhases(res.Transaction, result)
+	if res.TransactionCell != nil {
+		tx, parseErr := res.ParseTransaction()
+		if parseErr != nil {
+			b.sendError(client, req.ID, "failed to parse emulated transaction: "+parseErr.Error())
+			return
+		}
+		result["transaction"] = serializeTransaction(tx)
+		result["total_fees"] = tx.TotalFees.Coins.Nano().String()
+		summarizeTxPhases(tx, result)
 	}
 
 	b.sendResult(client, req.ID, result)
@@ -1409,4 +1431,3 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 		lastLT = newAcc.LastTxLT
 	}
 }
-

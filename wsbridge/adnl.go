@@ -94,7 +94,7 @@ func (b *WSBridge) setupPeerHandlers(peer adnl.Peer, owner *wsClient) {
 		for _, overlayHex := range orphanedOverlays {
 			b.activeOverlaysMu.Lock()
 			if ow, ok := b.activeOverlays[overlayHex]; ok {
-				ow.Close()
+				closeOverlay(ow)
 				delete(b.activeOverlays, overlayHex)
 			}
 			b.activeOverlaysMu.Unlock()
@@ -220,13 +220,21 @@ func (b *WSBridge) handleADNLConnectByADNL(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	// C8: SSRF protection — reject private/loopback addresses resolved via DHT
-	if b.cfg.Namespaces.ADNL.SSRFProtection && isPrivateIP(address.IPValue(addrs.Addresses[0])) {
-		b.sendError(client, req.ID, "private/loopback addresses not allowed", -32602)
+	var addr string
+	for _, candidate := range addrs.Addresses {
+		ip := address.IPValue(candidate)
+		if ip == nil || (b.cfg.Namespaces.ADNL.SSRFProtection && isPrivateIP(ip)) {
+			continue
+		}
+		addr, err = address.DialString(candidate)
+		if err == nil {
+			break
+		}
+	}
+	if addr == "" {
+		b.sendError(client, req.ID, "no allowed UDP addresses found for ADNL ID", -32602)
 		return
 	}
-
-	addr := fmt.Sprintf("%s:%d", address.IPValue(addrs.Addresses[0]).String(), address.PortValue(addrs.Addresses[0]))
 
 	peer, err := b.gate.RegisterClient(addr, pubKey)
 	if err != nil {

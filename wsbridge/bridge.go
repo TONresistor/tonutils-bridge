@@ -297,7 +297,7 @@ func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
 		for _, overlayHex := range client.overlays {
 			b.activeOverlaysMu.Lock()
 			if ow, ok := b.activeOverlays[overlayHex]; ok {
-				ow.Close()
+				closeOverlay(ow)
 				delete(b.activeOverlays, overlayHex)
 			}
 			b.activeOverlaysMu.Unlock()

@@ -31,6 +31,14 @@ func clientOwnsOverlay(client *wsClient, overlayHex string) bool {
 	return false
 }
 
+func closeOverlay(overlayWrapper *overlay.ADNLOverlayWrapper) {
+	if overlayWrapper == nil {
+		return
+	}
+	overlayWrapper.Close()
+	overlayWrapper.BroadcastReceiver.Close()
+}
+
 func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	var params struct {
 		OverlayID string `json:"overlay_id"` // base64
@@ -86,7 +94,19 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 
 	// Wrap the peer with overlay support and create the overlay scope
 	adnlWrapper := overlay.CreateExtendedADNL(peer)
-	overlayWrapper := adnlWrapper.WithOverlay(overlayID)
+	receiver, err := overlay.NewBroadcastReceiver(overlayID, 0, true, false)
+	if err != nil {
+		b.activeOverlaysMu.Unlock()
+		b.sendError(client, req.ID, "failed to create overlay receiver: "+err.Error(), -32602)
+		return
+	}
+	overlayWrapper, err := adnlWrapper.AttachOverlay(receiver)
+	if err != nil {
+		receiver.Close()
+		b.activeOverlaysMu.Unlock()
+		b.sendError(client, req.ID, "failed to attach overlay: "+err.Error())
+		return
+	}
 
 	b.activeOverlays[overlayHex] = overlayWrapper
 	b.activeOverlaysMu.Unlock()
@@ -97,21 +117,21 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	b.overlayToPeerMu.Unlock()
 
 	// Set broadcast handler — pushes events to the owning client
-	overlayWrapper.SetBroadcastHandler(func(msg tl.Serializable, trusted bool) error {
+	overlayWrapper.SetBroadcastHandlerWithInfo(func(msg tl.Serializable, info overlay.BroadcastInfo) overlay.BroadcastDisposition {
 		var msgBytes []byte
 		serialized, err := tl.Serialize(msg, true)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to serialize overlay broadcast")
-			return nil
+			return overlay.BroadcastDispositionIgnore
 		}
 		msgBytes = serialized
 
 		b.sendEvent(client, "overlay.broadcast", map[string]interface{}{
 			"overlay_id": params.OverlayID,
 			"message":    base64.StdEncoding.EncodeToString(msgBytes),
-			"trusted":    trusted,
+			"trusted":    info.Trusted,
 		})
-		return nil
+		return overlay.BroadcastDispositionIgnore
 	})
 
 	overlayWrapper.SetCustomMessageHandler(func(msg *adnl.MessageCustom) error {
@@ -194,7 +214,7 @@ func (b *WSBridge) handleOverlayLeave(client *wsClient, req *WSRequest) {
 	delete(b.overlayToPeer, overlayHex)
 	b.overlayToPeerMu.Unlock()
 
-	ow.Close()
+	closeOverlay(ow)
 
 	b.sendResult(client, req.ID, map[string]interface{}{
 		"left": true,
