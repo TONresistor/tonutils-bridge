@@ -59,7 +59,7 @@ func (b *WSBridge) handleSBTGetAuthorityAddress(client *wsClient, req *WSRequest
 	}
 
 	b.sendResult(client, req.ID, map[string]any{
-		"authority": authority.String(),
+		"authority": addressStringOrNil(authority),
 	})
 }
 

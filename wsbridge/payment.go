@@ -50,16 +50,14 @@ func (b *WSBridge) handlePaymentGetChannelState(client *wsClient, req *WSRequest
 		"party_address":   nil,
 		"closing_config": map[string]any{
 			"quarantine_duration":               s.ClosingConfig.QuarantineDuration,
-			"conditional_close_duration":         s.ClosingConfig.ConditionalCloseDuration,
-			"actions_duration":                   s.ClosingConfig.ActionsDuration,
-			"replication_message_attach_amount":  s.ClosingConfig.ReplicationMessageAttachAmount.Nano().String(),
+			"conditional_close_duration":        s.ClosingConfig.ConditionalCloseDuration,
+			"actions_duration":                  s.ClosingConfig.ActionsDuration,
+			"replication_message_attach_amount": s.ClosingConfig.ReplicationMessageAttachAmount.Nano().String(),
 		},
 		"quarantine": nil,
 	}
 
-	if s.PartyAddress != nil {
-		result["party_address"] = s.PartyAddress.String()
-	}
+	result["party_address"] = addressStringOrNil(s.PartyAddress)
 
 	if s.Quarantine != nil {
 		q := s.Quarantine

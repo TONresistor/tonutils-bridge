@@ -33,25 +33,28 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 	}
 
 	result := map[string]any{
-		"wallet":      nil,
-		"site_adnl":   nil,
-		"has_storage": false,
-		"owner":       nil,
-		"nft_address": nil,
-		"collection":  nil,
-		"editor":      nil,
-		"initialized": false,
-		"expiring_at": nil,
+		"wallet":         nil,
+		"site_adnl":      nil,
+		"storage_bag_id": nil,
+		"has_storage":    false,
+		"owner":          nil,
+		"nft_address":    nil,
+		"collection":     nil,
+		"editor":         nil,
+		"initialized":    false,
+		"expiring_at":    nil,
 	}
 
 	wallet := domain.GetWalletRecord()
-	if wallet != nil {
-		result["wallet"] = wallet.String()
-	}
+	result["wallet"] = addressStringOrNil(wallet)
 
 	siteRecord, inStorage := domain.GetSiteRecord()
 	if siteRecord != nil {
-		result["site_adnl"] = hex.EncodeToString(siteRecord)
+		if inStorage {
+			result["storage_bag_id"] = hex.EncodeToString(siteRecord)
+		} else {
+			result["site_adnl"] = hex.EncodeToString(siteRecord)
+		}
 	}
 	result["has_storage"] = inStorage
 
@@ -59,16 +62,12 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 	nftData, err := domain.GetNFTData(ctx)
 	if err == nil {
 		result["initialized"] = nftData.Initialized
-		if nftData.OwnerAddress != nil {
-			result["owner"] = nftData.OwnerAddress.String()
-		}
-		if nftData.CollectionAddress != nil {
-			result["collection"] = nftData.CollectionAddress.String()
-		}
+		result["owner"] = addressStringOrNil(nftData.OwnerAddress)
+		result["collection"] = addressStringOrNil(nftData.CollectionAddress)
 	}
 
 	// Domain expiration from the collection contract
-	if nftData != nil && nftData.CollectionAddress != nil {
+	if nftData != nil && nftData.CollectionAddress != nil && !nftData.CollectionAddress.IsAddrNone() {
 		// Strip TLD, reverse remaining parts, null-separate for TON DNS encoding.
 		// "example.ton" -> "example\0", "sub.example.ton" -> "example\0sub\0"
 		parts := strings.Split(strings.TrimSuffix(params.Domain, "."), ".")
@@ -111,14 +110,12 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 	}
 
 	// NFT address of the domain itself
-	if nftAddr := domain.GetNFTAddress(); nftAddr != nil {
-		result["nft_address"] = nftAddr.String()
-	}
+	result["nft_address"] = addressStringOrNil(domain.GetNFTAddress())
 
 	// Editor address (who can modify DNS records)
 	editor, err := domain.GetEditor(ctx)
-	if err == nil && editor != nil {
-		result["editor"] = editor.String()
+	if err == nil {
+		result["editor"] = addressStringOrNil(editor)
 	}
 
 	// Collect all DNS text records (category 0x1eda) from the records dictionary.
@@ -136,8 +133,8 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 			if err != nil || cat != 0x1eda {
 				continue
 			}
-			data, err := ref.LoadBinarySnake()
-			if err != nil || len(data) < 2 {
+			text, err := decodeDNSText(ref)
+			if err != nil {
 				continue
 			}
 			keySlice, err := kv.Key.LoadSlice(256)
@@ -145,7 +142,7 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 				continue
 			}
 			keyHex := hex.EncodeToString(keySlice)
-			textRecords[keyHex] = string(data[2:])
+			textRecords[keyHex] = text
 		}
 		if len(textRecords) > 0 {
 			result["text_records"] = textRecords
@@ -153,4 +150,30 @@ func (b *WSBridge) handleDNSResolve(client *wsClient, req *WSRequest) {
 	}
 
 	b.sendResult(client, req.ID, result)
+}
+
+func decodeDNSText(current *cell.Slice) (string, error) {
+	count, err := current.LoadUInt(8)
+	if err != nil {
+		return "", err
+	}
+	data := make([]byte, 0)
+	for i := uint64(0); i < count; i++ {
+		length, err := current.LoadUInt(8)
+		if err != nil {
+			return "", err
+		}
+		chunk, err := current.LoadSlice(uint(length * 8))
+		if err != nil {
+			return "", err
+		}
+		data = append(data, chunk...)
+		if i+1 < count {
+			current, err = current.LoadRef()
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	return string(data), nil
 }
