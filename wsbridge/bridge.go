@@ -59,11 +59,6 @@ type TonnetChallenge struct {
 	Expires int32  `tl:"int"`
 }
 
-// OverlayKey matches adnlTunnel.overlayKey from adnl-tunnel
-type OverlayKey struct {
-	PaymentNode []byte `tl:"int256"`
-}
-
 func init() {
 	tl.Register(RawMessage{}, "ws.rawMessage data:bytes = ws.RawMessage")
 	tl.Register(TonnetBroadcast{}, "tonnet.broadcast src:PublicKey certificate:overlay.Certificate flags:int data:bytes date:int signature:bytes = tonnet.Broadcast")
@@ -71,13 +66,6 @@ func init() {
 	tl.Register(TonnetTime{}, "tonnet.time now:int = tonnet.Time")
 	tl.Register(TonnetGetChallenge{}, "tonnet.getChallenge = tonnet.Challenge")
 	tl.Register(TonnetChallenge{}, "tonnet.challenge nonce:int256 expires:int = tonnet.Challenge")
-}
-
-// RegisterOverlayKey registers the OverlayKey TL type. Call this only when
-// the adnl-tunnel package is NOT imported (it registers the same schema).
-// When adnl-tunnel IS imported (e.g. in main.go), skip this call.
-func RegisterOverlayKey() {
-	tl.Register(OverlayKey{}, "adnlTunnel.overlayKey paymentNode:int256 = adnlTunnel.OverlayKey")
 }
 
 // WSRequest is a JSON-RPC 2.0 request from the WebSocket client
@@ -132,11 +120,8 @@ type WSBridge struct {
 	clients  map[*wsClient]bool
 	mu       sync.RWMutex
 
-	activePeers   map[string]adnl.Peer
-	activePeersMu sync.RWMutex
-	// One tonutils-go overlay manager and one owner per live ADNL peer.
-	// Lifecycle mutations are serialized so stale disconnect callbacks cannot
-	// remove a replacement peer with the same ADNL identity.
+	activePeers     map[string]adnl.Peer
+	activePeersMu   sync.RWMutex
 	peerLifecycleMu sync.Mutex
 	peerWrappers    map[string]*overlay.ADNLWrapper
 	peerOwners      map[string]*wsClient

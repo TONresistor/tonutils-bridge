@@ -72,7 +72,7 @@ The values below are defaults; every one is tunable via `config.json` (see [Conf
 
 ### SSRF Protection
 
-`adnl.connect` and `adnl.connectByADNL` reject private, loopback, and reserved IP addresses. Toggle with `namespaces.adnl.ssrf_protection` in `config.json` (on by default).
+`adnl.connect` rejects private, loopback, and reserved IP addresses when `namespaces.adnl.ssrf_protection` is enabled (the default). `adnl.connectByADNL` always enforces public-unicast addresses because DHT discovery records are untrusted.
 
 ## Configuration
 
@@ -100,7 +100,7 @@ Each namespace can be disabled (`enabled: false`) and given its own `timeout`. C
 
 > **Invariant:** keep `websocket.max_inflight > namespaces.subscribe.max_subscriptions`. Each active subscription holds one in-flight request slot for its whole lifetime, so if the two are equal a client that maxes out its subscriptions can no longer issue `subscribe.unsubscribe`. The bridge rejects configs that violate this at startup.
 
-## Methods (66)
+## Methods (67)
 
 ### Subscriptions - Real-Time Push (8)
 
@@ -122,42 +122,45 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | Method | Params | Response |
 |--------|--------|----------|
 | `adnl.connect` | `address` (ip:port), `key` (base64) | `{connected, peer_id, remote_addr}` |
-| `adnl.connectByADNL` | `adnl_id` (base64) | `{connected, peer_id, remote_addr}` |
+| `adnl.connectByADNL` | `adnl_id` (base64) | `{connected, peer_id, remote_addr}` after trying up to 8 public DHT endpoints and verifying liveness |
 | `adnl.sendMessage` | `peer_id`, `data` (base64) | `{sent}` |
 | `adnl.ping` | `peer_id` | `{latency_ms}` |
 | `adnl.disconnect` | `peer_id` | `{disconnected}` |
 | `adnl.peers` | | `{peers: [{id, addr}]}` |
-| `adnl.query` | `peer_id`, `data` (base64), `timeout` | `{data: "base64"}` |
+| `adnl.query` | `peer_id`, `data` (boxed TL by default), `timeout`, `raw?` | `{data: "base64"}`; `raw:true` preserves legacy `ws.rawMessage` payloads |
 | `adnl.setQueryHandler` | `peer_id` | `{enabled}` then push `adnl.queryReceived` events |
-| `adnl.answer` | `query_id` (hex), `data` (base64) | `{answered}` |
+| `adnl.answer` | `query_id` (32-byte hex), `data`, `raw?` | `{answered}`; echo the `raw` flag from `queryReceived` |
 
-### Overlay - Network Overlays (8)
+### Overlay - Network Overlays (9)
 
 | Method | Params | Response |
 |--------|--------|----------|
 | `overlay.join` | `overlay_id`, `peer_id` (base64) | `{joined, overlay_id}` then push `overlay.broadcast` / `overlay.message` events |
 | `overlay.leave` | `overlay_id` | `{left}` |
-| `overlay.getPeers` | `overlay_id` | `{peers: [{id, overlay}]}` |
+| `overlay.getPeers` | `overlay_id` | `{peers: [{id, adnl_id, overlay}]}` |
 | `overlay.sendMessage` | `overlay_id`, `data` (base64) | `{sent}` — unicast to the joined peer |
+| `overlay.sendRaw` | `overlay_id`, boxed TL `data` (base64) | `{sent}` — unicast without the `ws.rawMessage` wrapper |
 | `overlay.broadcast` | `overlay_id`, `data` (base64, ≤1 MiB) | `{broadcast_id}` — signed FEC fan-out to the whole overlay |
-| `overlay.query` | `overlay_id`, `data` (base64), `timeout` | `{data: "base64"}` |
+| `overlay.query` | `overlay_id`, `data` (boxed TL by default, 1..8064 B), `timeout`, `raw?` | `{data: "base64"}`; `raw:true` preserves legacy payloads |
 | `overlay.setQueryHandler` | `overlay_id`, `peer_id` | `{enabled}` then push `overlay.queryReceived` events |
-| `overlay.answer` | `query_id` (hex), `data` (base64) | `{answered}` |
+| `overlay.answer` | `query_id` (32-byte hex), `data`, `raw?` | `{answered}`; echo the `raw` flag from `queryReceived` |
 
-Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` events: `{overlay_id, message (base64 ws.rawMessage), trusted}`. A sender does not receive an echo of its own broadcast.
+Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` events: `{overlay_id, message (base64 ws.rawMessage), trusted}`. Untrusted broadcasts are delivered locally but not re-relayed; trusted broadcasts may be relayed. Each WebSocket client may run at most 4 concurrent FEC broadcasters. A sender does not receive an echo of its own broadcast.
 
 ### DHT - Distributed Hash Table (6)
 
 | Method | Params | Response | Timeout |
 |--------|--------|----------|---------|
 | `dht.findAddresses` | `key` (base64, 32 bytes) | `{addresses: [{ip, port}], pubkey}` | 15s |
-| `dht.findOverlayNodes` | `overlay_key` (base64) | `{nodes: [{id, overlay, version}], count}` | 15s |
-| `dht.findTunnelNodes` | | `{relays: [{adnl_id, version}], count}` | 30s |
+| `dht.findOverlayNodes` | raw `overlay_key` (base64, 1..256 B) | `{nodes: [{id, adnl_id, overlay, version}], count}` | 15s |
+| `dht.findTunnelNodes` | | `{relays: [{id, adnl_id, version}], count}` | 30s |
 | `dht.findValue` | `key_id` (base64), `name`, `index` | `{data: "base64", ttl}` | 15s |
-| `dht.storeAddress` | `addresses[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key}` | 15s |
-| `dht.storeOverlayNodes` | `overlay_key`, `nodes[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key}` | 15s |
+| `dht.storeAddress` | IPv4/IPv6 `addresses[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key, adnl_id}` | 15s |
+| `dht.storeOverlayNodes` | raw `overlay_key` (1..256 B), `nodes[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key, overlay_id}` | 15s |
 
 `dht.storeAddress` and `dht.storeOverlayNodes` are **disabled by default** (they publish records signed by the bridge's persistent ADNL key, which would let a client hijack the bridge identity in the DHT). When disabled, any call returns error -32603. Enable them by setting `namespaces.dht.allow_write: true` in `config.json`. The `replicas` param is accepted for wire compatibility but ignored (tonutils-go v1.17+ internalizes DHT replication).
+
+`overlay.getPeers`, `dht.findOverlayNodes`, and `dht.findTunnelNodes` return `id` (ed25519 public key) and `adnl_id` (`tl.Hash(pub.ed25519{key})`). Pass `adnl_id` to `adnl.connectByADNL` / `dht.findAddresses` — not `id`.
 
 ### Lite - Blockchain Queries (20)
 
@@ -166,17 +169,17 @@ Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` 
 | `lite.getMasterchainInfo` | | `{seqno, workchain, shard, root_hash, file_hash}` | 10s |
 | `lite.getAccountState` | `address` | `{balance, status, last_tx_lt, last_tx_hash, has_code, has_data, code?, data?}` | 10s |
 | `lite.runMethod` | `address`, `method`, `params[]` | `{exit_code, stack[]}` (`exit_code` is always `0` on success; non-0/1 codes surface as an error) | 10s |
-| `lite.emulateMessage` | `address`, `boc` (base64), `type` (`external` default \| `internal`), `amount` (nano-TON, required when `type=internal`) | `{accepted, exit_code, gas_used, steps, committed, new_data?, actions?, out_messages[]}` | 10s |
+| `lite.emulateMessage` | `address`, `boc` (full external message or internal message body), `type` (`external` default \| `internal`), `amount` (nano-TON, required when internal) | `{accepted, exit_code, gas_used, steps, committed, new_data?, actions?, out_messages[]}` | 10s |
 | `lite.emulateTransaction` | `address`, `boc` (base64, full message cell) | `{accepted, success, exit_code, gas_used, total_fees, fees: {storage_fee, gas_fee, fwd_fee, action_fee}, aborted, action_result_code?, compute_skipped?, transaction}` | 10s |
 | `lite.sendMessage` | `boc` (base64) | `{hash, status}` | 10s |
 | `lite.sendMessageWait` | `boc` (base64) | `{hash, status}` (longer liteserver timeout; does NOT wait for on-chain confirmation) | 60s |
 | `lite.getTransactions` | `address`, `limit`, `last_lt?`, `last_hash?` | `{transactions}` | 10s |
-| `lite.getTransaction` | `address`, `lt` | serialized transaction | 10s |
+| `lite.getTransaction` | `address`, `lt` | serialized transaction; scans until found, history ends, or timeout | 10s |
 | `lite.findTxByInMsgHash` | `address`, `msg_hash` (hex) | serialized transaction | 10s |
 | `lite.findTxByOutMsgHash` | `address`, `msg_hash` (hex) | serialized transaction | 10s |
 | `lite.getTime` | | `{time}` | 10s |
 | `lite.lookupBlock` | `workchain`, `shard` (hex), `seqno` | `{workchain, shard, seqno, root_hash, file_hash}` | 10s |
-| `lite.getBlockTransactions` | `workchain`, `shard`, `seqno`, `count` | `{transactions, incomplete}` | 10s |
+| `lite.getBlockTransactions` | `workchain`, `shard`, `seqno`, `count`, `after?` | `{transactions, incomplete, next_after}` | 10s |
 | `lite.getShards` | | `{shards}` | 10s |
 | `lite.getBlockchainConfig` | `params[]` (optional) | `{params: {id: "base64_boc"}}` | 10s |
 | `lite.getBlockData` | `workchain`, `shard`, `seqno` | `{boc}` | 10s |
@@ -184,9 +187,9 @@ Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` 
 | `lite.getLibraries` | `hashes[]` (hex) | `{libraries: [{hash, boc} or null]}` | 10s |
 | `lite.sendAndWatch` | `boc` (base64) | `{watching, subscription_id, msg_hash}` then push events | 180s |
 
-`lite.emulateMessage` runs the message locally against the account's real on-chain state using the native Go TVM (no broadcast) — a dry-run before `lite.sendMessage`. The TVM emulator is alpha upstream; results may differ from real on-chain execution in edge cases. The account must be initialized.
+`lite.emulateMessage` runs the message locally against verified account/config state and current network time using the native Go TVM (no broadcast) — a dry-run before `lite.sendMessage`. Random seed, previous-block tuple and external libraries remain synthetic unless present in the account/config inputs, so results may differ from execution in a real block. The account must be initialized.
 
-`lite.emulateTransaction` goes further: it runs the **full transaction** (storage + credit + compute + action phases), so it reports `total_fees` and a per-phase `fees` breakdown plus `success`/`aborted` — the preflight a wallet needs to show fees and "will it succeed" before signing. `boc` must be a full message cell (the same external-in BOC passed to `lite.sendMessage`). Same alpha caveat; account must be initialized.
+`lite.emulateTransaction` goes further: it runs the **full transaction** (storage + credit + compute + action phases) from the verified account cell, so it reports `total_fees` and a per-phase `fees` breakdown plus `success`/`aborted`. `boc` must be a full message cell (the same external-in BOC passed to `lite.sendMessage`). The same synthetic-context caveat applies.
 
 ### Jetton (3)
 
@@ -210,7 +213,7 @@ Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` 
 
 | Method | Params | Response |
 |--------|--------|----------|
-| `dns.resolve` | `domain` | `{wallet, site_adnl, has_storage, owner, nft_address, collection, editor, initialized, expiring_at, text_records?}` (`text_records` only present when non-empty) |
+| `dns.resolve` | `domain` | `{wallet, site_adnl, storage_bag_id, has_storage, owner, nft_address, collection, editor, initialized, expiring_at, text_records?}` |
 
 ### Wallet (2)
 
@@ -236,7 +239,7 @@ Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` 
 
 | Method | Params | Response |
 |--------|--------|----------|
-| `network.info` | | `{dht_connected, ws_clients}` |
+| `network.info` | | `{dht_initialized, dht_connected, dht_active_nodes, ws_clients}` |
 
 ## Push Events (18)
 
@@ -252,10 +255,10 @@ Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` 
 |-------|---------|------|
 | `adnl.message` | Incoming message from a peer | `{from, message}` (base64) |
 | `adnl.disconnected` | Peer disconnected | `{peer}` (base64) |
-| `adnl.queryReceived` | Inbound query (after `setQueryHandler`) | `{peer_id, query_id, data}` |
+| `adnl.queryReceived` | Inbound query (after `setQueryHandler`) | `{peer_id, query_id, data, raw}` |
 | `overlay.broadcast` | Overlay broadcast received | `{overlay_id, message, trusted}` |
 | `overlay.message` | Overlay custom message received | `{overlay_id, message}` |
-| `overlay.queryReceived` | Inbound overlay query | `{overlay_id, query_id, data}` |
+| `overlay.queryReceived` | Inbound overlay query | `{overlay_id, query_id, data, raw}` |
 
 ### Subscription events (subscribing client only)
 
@@ -270,7 +273,7 @@ Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` 
 | `tx_timeout` | `lite.sendAndWatch` | `{msg_hash, reason}` |
 | `trace_started` | `subscribe.trace` | `{trace_id, root_tx, subscription_id}` |
 | `trace_tx` | `subscribe.trace` | `{trace_id, transaction, depth, address}` |
-| `trace_timeout` | `subscribe.trace` | `{trace_id, address, body_hash, depth}` |
+| `trace_timeout` | `subscribe.trace` | `{trace_id, address, message_hash, body_hash, depth}` (`body_hash` is retained for compatibility) |
 | `trace_complete` | `subscribe.trace` | `{trace_id, total_txs, max_depth_reached, timed_out_count}` |
 
 ## Tests
