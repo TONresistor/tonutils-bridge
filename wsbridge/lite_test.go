@@ -1,11 +1,34 @@
 package wsbridge
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/ton"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 )
+
+type verifiedBlockAPI struct {
+	ton.APIClientWrapped
+	dataCalled   bool
+	headerCalled bool
+}
+
+func (a *verifiedBlockAPI) LookupBlock(context.Context, int32, int64, uint32) (*ton.BlockIDExt, error) {
+	return &ton.BlockIDExt{Workchain: -1, Shard: -0x8000000000000000, SeqNo: 1, RootHash: make([]byte, 32), FileHash: make([]byte, 32)}, nil
+}
+
+func (a *verifiedBlockAPI) GetBlockDataAsCell(context.Context, *ton.BlockIDExt) (*cell.Cell, error) {
+	a.dataCalled = true
+	return cell.BeginCell().EndCell(), nil
+}
+
+func (a *verifiedBlockAPI) GetBlockHeader(context.Context, *ton.BlockIDExt) (*tlb.BlockHeader, error) {
+	a.headerCalled = true
+	return &tlb.BlockHeader{}, nil
+}
 
 // ordinaryTx wraps an ordinary transaction description for summarizeTxPhases.
 func ordinaryTx(desc tlb.TransactionDescriptionOrdinary) *tlb.Transaction {
@@ -179,4 +202,26 @@ func TestSummarizeTxPhases_PointerDescription(t *testing.T) {
 func ptrCoins(nano uint64) *tlb.Coins {
 	c := tlb.FromNanoTONU(nano)
 	return &c
+}
+
+func TestBlockMethodsUseVerifiedTonutilsHelpers(t *testing.T) {
+	api := &verifiedBlockAPI{}
+	bridge := testBridge()
+	bridge.api = api
+	conn, cleanup := dialTestBridge(t, bridge)
+	defer cleanup()
+
+	params := map[string]any{"workchain": -1, "shard": "8000000000000000", "seqno": 1}
+	resp := rpc(t, conn, "data", "lite.getBlockData", params)
+	if resp.Error != nil {
+		t.Fatalf("getBlockData failed: %s", resp.Error.Message)
+	}
+	if !api.dataCalled {
+		t.Fatal("lite.getBlockData bypassed GetBlockDataAsCell")
+	}
+
+	_ = rpc(t, conn, "header", "lite.getBlockHeader", params)
+	if !api.headerCalled {
+		t.Fatal("lite.getBlockHeader bypassed GetBlockHeader")
+	}
 }
