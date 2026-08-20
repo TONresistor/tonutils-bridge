@@ -1,7 +1,6 @@
 package wsbridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -21,7 +20,9 @@ import (
 // until a transaction consuming this message appears.
 type pendingMsg struct {
 	destAddr *address.Address
-	bodyHash []byte // 32 bytes — cell hash of the message body
+	msgHash  []byte // 32 bytes — hash of the complete internal message cell
+	bodyHash []byte // deprecated event compatibility; matching uses msgHash
+	after    time.Time
 	depth    int
 }
 
@@ -30,8 +31,8 @@ type pendingMsg struct {
 type traceState struct {
 	traceID    string
 	rootAddr   string
-	pending    int32         // atomic: number of unresolved messages
-	timedOut   int32         // atomic: number of timed-out messages
+	pending    int32 // atomic: number of unresolved messages
+	timedOut   int32 // atomic: number of timed-out messages
 	maxDepth   int
 	msgTimeout time.Duration
 }
@@ -257,9 +258,7 @@ func (b *WSBridge) traceCoordinator(ctx context.Context, client *wsClient, rootT
 	}
 }
 
-// resolveMessage polls the blockchain for a transaction on destAddr whose
-// incoming message body hash matches bodyHash. When found, it pushes a
-// trace_tx event and feeds any new internal out_msgs back into newMsgsCh.
+// resolveMessage follows one internal message until it is processed or expires.
 func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID string, msg pendingMsg, state *traceState, newMsgsCh chan<- pendingMsg) {
 	defer atomic.AddInt32(&state.pending, -1)
 
@@ -272,10 +271,11 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 	if err != nil {
 		atomic.AddInt32(&state.timedOut, 1)
 		_ = b.sendEvent(client, "trace_timeout", map[string]interface{}{
-			"trace_id":  traceID,
-			"address":   msg.destAddr.String(),
-			"body_hash": hex.EncodeToString(msg.bodyHash),
-			"depth":     msg.depth,
+			"trace_id":     traceID,
+			"address":      msg.destAddr.String(),
+			"message_hash": hex.EncodeToString(msg.msgHash),
+			"body_hash":    hex.EncodeToString(msg.bodyHash), // deprecated compatibility field
+			"depth":        msg.depth,
 		})
 		return
 	}
@@ -286,10 +286,11 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 		// Account may not exist (uninit) — timeout gracefully
 		atomic.AddInt32(&state.timedOut, 1)
 		_ = b.sendEvent(client, "trace_timeout", map[string]interface{}{
-			"trace_id":  traceID,
-			"address":   msg.destAddr.String(),
-			"body_hash": hex.EncodeToString(msg.bodyHash),
-			"depth":     msg.depth,
+			"trace_id":     traceID,
+			"address":      msg.destAddr.String(),
+			"message_hash": hex.EncodeToString(msg.msgHash),
+			"body_hash":    hex.EncodeToString(msg.bodyHash), // deprecated compatibility field
+			"depth":        msg.depth,
 		})
 		return
 	}
@@ -298,7 +299,7 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 
 	// Check existing transactions first — the message may already be processed
 	if lastLT > 0 && acc.LastTxHash != nil {
-		if b.scanForMatch(msgCtx, client, traceID, msg, state, newMsgsCh, acc.LastTxLT, acc.LastTxHash) {
+		if b.scanForMatch(msgCtx, client, traceID, msg, state, newMsgsCh) {
 			return
 		}
 	}
@@ -310,10 +311,11 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 		case <-msgCtx.Done():
 			atomic.AddInt32(&state.timedOut, 1)
 			_ = b.sendEvent(client, "trace_timeout", map[string]interface{}{
-				"trace_id":  traceID,
-				"address":   msg.destAddr.String(),
-				"body_hash": hex.EncodeToString(msg.bodyHash),
-				"depth":     msg.depth,
+				"trace_id":     traceID,
+				"address":      msg.destAddr.String(),
+				"message_hash": hex.EncodeToString(msg.msgHash),
+				"body_hash":    hex.EncodeToString(msg.bodyHash), // deprecated compatibility field
+				"depth":        msg.depth,
 			})
 			return
 		default:
@@ -324,10 +326,11 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 			if msgCtx.Err() != nil {
 				atomic.AddInt32(&state.timedOut, 1)
 				_ = b.sendEvent(client, "trace_timeout", map[string]interface{}{
-					"trace_id":  traceID,
-					"address":   msg.destAddr.String(),
-					"body_hash": hex.EncodeToString(msg.bodyHash),
-					"depth":     msg.depth,
+					"trace_id":     traceID,
+					"address":      msg.destAddr.String(),
+					"message_hash": hex.EncodeToString(msg.msgHash),
+					"body_hash":    hex.EncodeToString(msg.bodyHash), // deprecated compatibility field
+					"depth":        msg.depth,
 				})
 				return
 			}
@@ -346,7 +349,7 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 		}
 
 		// New transactions — scan them for our message
-		if b.scanForMatch(msgCtx, client, traceID, msg, state, newMsgsCh, newAcc.LastTxLT, newAcc.LastTxHash) {
+		if b.scanForMatch(msgCtx, client, traceID, msg, state, newMsgsCh) {
 			return
 		}
 
@@ -354,54 +357,33 @@ func (b *WSBridge) resolveMessage(ctx context.Context, client *wsClient, traceID
 	}
 }
 
-// scanForMatch fetches recent transactions on the destination account and
-// checks if any has an inbound message whose body hash matches. Returns true
-// if a match was found.
-func (b *WSBridge) scanForMatch(ctx context.Context, client *wsClient, traceID string, msg pendingMsg, state *traceState, newMsgsCh chan<- pendingMsg, lt uint64, hash []byte) bool {
-	txList, err := b.api.ListTransactions(ctx, msg.destAddr, 10, lt, hash)
+// scanForMatch bounds tonutils-go's history walk by the source transaction time.
+func (b *WSBridge) scanForMatch(ctx context.Context, client *wsClient, traceID string, msg pendingMsg, state *traceState, newMsgsCh chan<- pendingMsg) bool {
+	tx, err := b.api.FindLastTransactionByInMsgHashAfterTime(ctx, msg.destAddr, msg.msgHash, msg.after)
 	if err != nil {
-		log.Debug().Err(err).Str("trace_id", traceID).Msg("trace: ListTransactions failed")
+		log.Debug().Err(err).Str("trace_id", traceID).Msg("trace: message transaction not found yet")
 		return false
 	}
 
-	for _, tx := range txList {
-		if tx.IO.In == nil {
-			continue
-		}
-		inPayload := tx.IO.In.Msg.Payload()
-		if inPayload == nil {
-			continue
-		}
+	txData := serializeTransaction(tx)
+	txData["address"] = msg.destAddr.String()
 
-		if !bytes.Equal(inPayload.Hash(), msg.bodyHash) {
-			continue
-		}
-
-		// Match found — push trace_tx event
-		txData := serializeTransaction(tx)
-		txData["address"] = msg.destAddr.String()
-
-		if !b.sendEvent(client, "trace_tx", map[string]interface{}{
-			"trace_id":    traceID,
-			"transaction": txData,
-			"depth":       msg.depth,
-			"address":     msg.destAddr.String(),
-		}) {
-			return true // client dead, stop scanning
-		}
-
-		// If below max depth, extract internal out_msgs and feed them back
-		if msg.depth < state.maxDepth {
-			childMsgs := extractInternalOutMsgs(tx, msg.depth+1)
-			for _, child := range childMsgs {
-				newMsgsCh <- child
-			}
-		}
-
+	if !b.sendEvent(client, "trace_tx", map[string]interface{}{
+		"trace_id":    traceID,
+		"transaction": txData,
+		"depth":       msg.depth,
+		"address":     msg.destAddr.String(),
+	}) {
 		return true
 	}
 
-	return false
+	if msg.depth < state.maxDepth {
+		childMsgs := extractInternalOutMsgs(tx, msg.depth+1)
+		for _, child := range childMsgs {
+			newMsgsCh <- child
+		}
+	}
+	return true
 }
 
 // extractInternalOutMsgs extracts internal outgoing messages from a
@@ -427,15 +409,20 @@ func extractInternalOutMsgs(tx *tlb.Transaction, depth int) []pendingMsg {
 		if intMsg.DstAddr == nil {
 			continue
 		}
+		if intMsg.Body == nil {
+			continue
+		}
 
-		body := intMsg.Body
-		if body == nil {
+		msgCell, err := tlb.ToCell(outMsgs[i].Msg)
+		if err != nil {
 			continue
 		}
 
 		result = append(result, pendingMsg{
 			destAddr: intMsg.DstAddr,
-			bodyHash: body.Hash(),
+			msgHash:  msgCell.Hash(),
+			bodyHash: intMsg.Body.Hash(),
+			after:    time.Unix(int64(tx.Now), 0),
 			depth:    depth,
 		})
 	}

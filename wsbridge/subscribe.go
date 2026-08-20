@@ -158,7 +158,7 @@ func (b *WSBridge) handleSubscribeBlocks(client *wsClient, req *WSRequest) {
 
 		// WaitForBlock delegates to the liteserver — it blocks server-side until
 		// the requested seqno exists, avoiding busy polling on our end.
-		block, err := b.api.WaitForBlock(lastSeqno + 1).GetMasterchainInfo(ctx)
+		block, err := b.nextMasterchainBlock(ctx, lastSeqno)
 		if err != nil {
 			// Context cancelled means client disconnected — exit silently
 			if ctx.Err() != nil {
@@ -171,7 +171,9 @@ func (b *WSBridge) handleSubscribeBlocks(client *wsClient, req *WSRequest) {
 
 		shards, shardsErr := b.api.GetBlockShardsInfo(ctx, block)
 		if shardsErr != nil {
-			log.Warn().Err(shardsErr).Msg("failed to get block shards info, shard transactions may be missed")
+			log.Warn().Err(shardsErr).Msg("failed to get block shards info, retrying block")
+			time.Sleep(time.Second)
+			continue
 		}
 		var shardResults []map[string]interface{}
 		for _, s := range shards {
@@ -368,7 +370,7 @@ func (b *WSBridge) handleSubscribeNewTransactions(client *wsClient, req *WSReque
 		default:
 		}
 
-		block, err := b.api.WaitForBlock(lastSeqno + 1).GetMasterchainInfo(ctx)
+		block, err := b.nextMasterchainBlock(ctx, lastSeqno)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -381,52 +383,88 @@ func (b *WSBridge) handleSubscribeNewTransactions(client *wsClient, req *WSReque
 		blocks := []*ton.BlockIDExt{block}
 		shards, shardsErr := b.api.GetBlockShardsInfo(ctx, block)
 		if shardsErr != nil {
-			log.Warn().Err(shardsErr).Msg("failed to get block shards info, shard transactions may be missed")
+			log.Warn().Err(shardsErr).Msg("failed to get block shards info, retrying block")
+			time.Sleep(time.Second)
+			continue
 		}
 		blocks = append(blocks, shards...)
 
+		type blockTransactions struct {
+			block *ton.BlockIDExt
+			txs   []ton.TransactionShortInfo
+		}
+		collected := make([]blockTransactions, 0, len(blocks))
+		failed := false
 		for _, blk := range blocks {
-			var after *ton.TransactionID3
-			for {
-				var txList []ton.TransactionShortInfo
-				var incomplete bool
-				var err error
-				if after != nil {
-					txList, incomplete, err = b.api.GetBlockTransactionsV2(ctx, blk, 256, after)
-				} else {
-					txList, incomplete, err = b.api.GetBlockTransactionsV2(ctx, blk, 256)
-				}
-				if err != nil {
-					break
-				}
+			txList, err := b.collectBlockTransactions(ctx, blk)
+			if err != nil {
+				log.Warn().Err(err).Uint32("seqno", blk.SeqNo).Msg("failed to read all block transactions, retrying block")
+				failed = true
+				break
+			}
+			collected = append(collected, blockTransactions{block: blk, txs: txList})
+		}
+		if failed {
+			time.Sleep(time.Second)
+			continue
+		}
 
-				for _, tx := range txList {
-					if !b.sendEvent(client, "new_transaction", map[string]interface{}{
-						"account":         hex.EncodeToString(tx.Account),
-						"lt":              fmt.Sprintf("%d", tx.LT),
-						"hash":            hex.EncodeToString(tx.Hash),
-						"block_workchain": blk.Workchain,
-						"block_shard":     fmt.Sprintf("%016x", uint64(blk.Shard)),
-						"block_seqno":     blk.SeqNo,
-					}) {
-						return
-					}
-				}
-
-				if !incomplete || len(txList) == 0 {
-					break
-				}
-				after = txList[len(txList)-1].ID3()
-
-				select {
-				case <-ctx.Done():
+		for _, item := range collected {
+			for _, tx := range item.txs {
+				if !b.sendEvent(client, "new_transaction", map[string]interface{}{
+					"account":         hex.EncodeToString(tx.Account),
+					"lt":              fmt.Sprintf("%d", tx.LT),
+					"hash":            hex.EncodeToString(tx.Hash),
+					"block_workchain": item.block.Workchain,
+					"block_shard":     fmt.Sprintf("%016x", uint64(item.block.Shard)),
+					"block_seqno":     item.block.SeqNo,
+				}) {
 					return
-				default:
 				}
 			}
 		}
 
 		lastSeqno = block.SeqNo
+	}
+}
+
+func (b *WSBridge) nextMasterchainBlock(ctx context.Context, lastSeqno uint32) (*ton.BlockIDExt, error) {
+	tip, err := b.api.WaitForBlock(lastSeqno + 1).GetMasterchainInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return b.api.LookupBlock(ctx, tip.Workchain, tip.Shard, lastSeqno+1)
+}
+
+func (b *WSBridge) collectBlockTransactions(ctx context.Context, block *ton.BlockIDExt) ([]ton.TransactionShortInfo, error) {
+	var all []ton.TransactionShortInfo
+	var after *ton.TransactionID3
+	for {
+		var (
+			page       []ton.TransactionShortInfo
+			incomplete bool
+			err        error
+		)
+		if after == nil {
+			page, incomplete, err = b.api.GetBlockTransactionsV2(ctx, block, 256)
+		} else {
+			page, incomplete, err = b.api.GetBlockTransactionsV2(ctx, block, 256, after)
+		}
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if !incomplete {
+			return all, nil
+		}
+		if len(page) == 0 {
+			return nil, fmt.Errorf("incomplete block transaction page is empty")
+		}
+		next := page[len(page)-1].ID3()
+		if after != nil && after.LT == next.LT && bytes.Equal(after.Account, next.Account) {
+			return nil, fmt.Errorf("block transaction cursor did not advance")
+		}
+		after = next
 	}
 }
 
@@ -567,7 +605,7 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 		return
 	}
 
-	subCount := int32(len(params.Accounts))
+	const subCount int32 = 1
 	if atomic.AddInt32(&client.activeSubs, subCount) > int32(b.cfg.Namespaces.Subscribe.MaxSubscriptions) {
 		atomic.AddInt32(&client.activeSubs, -subCount)
 		b.sendError(client, req.ID, "too many subscriptions", -32602)
@@ -577,6 +615,7 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 
 	// Parse all addresses upfront to fail fast on bad input
 	addrs := make([]*address.Address, len(params.Accounts))
+	lastLTs := make([]uint64, len(params.Accounts))
 	for i, entry := range params.Accounts {
 		addr, err := parseAddress(entry.Address)
 		if err != nil {
@@ -584,6 +623,14 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 			return
 		}
 		addrs[i] = addr
+		if entry.LastLT != "" && entry.LastLT != "0" {
+			lastLT, err := strconv.ParseUint(entry.LastLT, 10, 64)
+			if err != nil {
+				b.sendError(client, req.ID, fmt.Sprintf("invalid last_lt at index %d: %s", i, err.Error()), -32602)
+				return
+			}
+			lastLTs[i] = lastLT
+		}
 	}
 
 	subID := fmt.Sprintf("sub_%d", atomic.AddUint64(&client.subCounter, 1))
@@ -608,15 +655,9 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 
 	for i, entry := range params.Accounts {
 		wg.Add(1)
-		go func(addr *address.Address, ops []uint32, lastLTStr string) {
+		go func(addr *address.Address, ops []uint32, lastLT uint64) {
 			defer wg.Done()
 
-			var lastLT uint64
-			if lastLTStr != "" && lastLTStr != "0" {
-				if parsed, parseErr := strconv.ParseUint(lastLTStr, 10, 64); parseErr == nil {
-					lastLT = parsed
-				}
-			}
 			if lastLT == 0 {
 				if blk, blkErr := b.api.CurrentMasterchainInfo(ctx); blkErr == nil {
 					if acc, accErr := b.api.GetAccount(ctx, blk, addr); accErr == nil && acc != nil {
@@ -671,7 +712,7 @@ func (b *WSBridge) handleSubscribeMultiAccount(client *wsClient, req *WSRequest)
 					}
 				}
 			}
-		}(addrs[i], entry.Operations, entry.LastLT)
+		}(addrs[i], entry.Operations, lastLTs[i])
 	}
 
 	wg.Wait()
