@@ -109,7 +109,7 @@ DHT write methods are disabled by default. Set `namespaces.dht.allow_write` to `
 | `lite.getAccountState` | `address` | Account state and optional code and data | 10s |
 | `lite.runMethod` | `address`, `method`, `params[]` | `{exit_code, stack[]}` | 10s |
 | `lite.emulateMessage` | `address`, `boc`, optional `type`, optional `amount` | Emulation result | 10s |
-| `lite.emulateTransaction` | `address`, `boc` | Transaction emulation and fees | 10s |
+| `lite.emulateTransaction` | `address`, `boc`, optional `ignore_chksig` | Transaction emulation and fees | 10s |
 | `lite.sendMessage` | `boc` | `{hash, status}` | 10s |
 | `lite.sendMessageWait` | `boc` | `{hash, status}` | 60s |
 | `lite.getTransactions` | `address`, `limit`, optional `last_lt`, optional `last_hash` | `{transactions}` | 10s |
@@ -128,7 +128,9 @@ DHT write methods are disabled by default. Set `namespaces.dht.allow_write` to `
 
 `lite.sendMessageWait` waits longer for the liteserver response. It does not wait for on-chain confirmation.
 
-`lite.emulateMessage` runs compute and action logic without broadcasting. `lite.emulateTransaction` runs the full transaction phases. Both use verified account and config state. Some block context remains synthetic, so on-chain results may differ.
+`lite.emulateMessage` runs compute and action logic without broadcasting. `lite.emulateTransaction` runs the full transaction phases and supports existing uninitialized accounts when the message carries their `StateInit`. Both use verified account and config state. Some block context remains synthetic, so on-chain results may differ.
+
+Set `ignore_chksig` to `true` only for local fee estimation. It makes signature checks succeed during that emulation call, defaults to `false`, and never changes `lite.sendMessage` or any broadcast path.
 
 ### Tokens and contracts
 

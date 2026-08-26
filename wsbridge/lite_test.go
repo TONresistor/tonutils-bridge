@@ -2,6 +2,7 @@ package wsbridge
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -9,6 +10,64 @@ import (
 	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
+
+func TestEmulateTransactionParamsSignatureCheckOption(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "disabled by default", raw: `{"address":"0:abc","boc":"te6ccg=="}`, want: false},
+		{name: "enabled explicitly", raw: `{"address":"0:abc","boc":"te6ccg==","ignore_chksig":true}`, want: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			params, err := parseEmulateTransactionParams(json.RawMessage(test.raw))
+			if err != nil {
+				t.Fatalf("parse params: %v", err)
+			}
+			if got := params.transactionOptions().SignatureCheckAlwaysSucceed; got != test.want {
+				t.Fatalf("SignatureCheckAlwaysSucceed = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAccountStateForTransactionEmulationAcceptsUninitializedAccount(t *testing.T) {
+	state := &tlb.AccountState{
+		IsValid: true,
+		AccountStorage: tlb.AccountStorage{
+			Status: tlb.AccountStatusUninit,
+		},
+	}
+	got, err := accountStateForTransactionEmulation(&tlb.Account{State: state})
+	if err != nil {
+		t.Fatalf("uninitialized account rejected: %v", err)
+	}
+	if got != state {
+		t.Fatal("returned a different account state")
+	}
+}
+
+func TestAccountStateForTransactionEmulationRejectsMissingAccount(t *testing.T) {
+	tests := []struct {
+		name string
+		acc  *tlb.Account
+	}{
+		{name: "nil account"},
+		{name: "missing state", acc: &tlb.Account{}},
+		{name: "invalid state", acc: &tlb.Account{State: &tlb.AccountState{}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := accountStateForTransactionEmulation(test.acc); err == nil {
+				t.Fatal("expected account to be rejected")
+			}
+		})
+	}
+}
 
 type verifiedBlockAPI struct {
 	ton.APIClientWrapped

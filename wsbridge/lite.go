@@ -368,14 +368,37 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 // total fees — a preflight before lite.sendMessage.
 //
 // `boc` must be a FULL message cell (an external-in message, as passed to
-// lite.sendMessage; or a full internal message). The account must be initialized.
+// lite.sendMessage; or a full internal message). The account must exist, but it
+// may still be uninitialized when the message carries its StateInit.
 // The TVM emulator is alpha upstream; results may differ in edge cases.
-func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
-	var params struct {
-		Address string `json:"address"`
-		BOC     string `json:"boc"`
+type emulateTransactionParams struct {
+	Address      string `json:"address"`
+	BOC          string `json:"boc"`
+	IgnoreChkSig bool   `json:"ignore_chksig"`
+}
+
+func parseEmulateTransactionParams(raw json.RawMessage) (emulateTransactionParams, error) {
+	var params emulateTransactionParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return emulateTransactionParams{}, err
 	}
-	if err := json.Unmarshal(req.Params, &params); err != nil {
+	return params, nil
+}
+
+func (p emulateTransactionParams) transactionOptions() tvm.TransactionOptions {
+	return tvm.TransactionOptions{SignatureCheckAlwaysSucceed: p.IgnoreChkSig}
+}
+
+func accountStateForTransactionEmulation(acc *tlb.Account) (*tlb.AccountState, error) {
+	if acc == nil || acc.State == nil || !acc.State.IsValid {
+		return nil, fmt.Errorf("account does not exist, cannot emulate")
+	}
+	return acc.State, nil
+}
+
+func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
+	params, err := parseEmulateTransactionParams(req.Params)
+	if err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
 		return
 	}
@@ -416,12 +439,13 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get account: "+err.Error())
 		return
 	}
-	if acc.Code == nil || acc.Data == nil {
-		b.sendError(client, req.ID, "account is not initialized, cannot emulate", -32602)
+	accountState, err := accountStateForTransactionEmulation(acc)
+	if err != nil {
+		b.sendError(client, req.ID, err.Error(), -32602)
 		return
 	}
 
-	accountCell, err := acc.State.ToCell()
+	accountCell, err := accountState.ToCell()
 	if err != nil {
 		b.sendError(client, req.ID, "failed to serialize verified account state: "+err.Error())
 		return
@@ -462,7 +486,7 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	res, err := tvm.NewTVM().EmulateTransaction(blockCtx, preparedAccount, preparedMessage, tvm.TransactionOptions{})
+	res, err := tvm.NewTVM().EmulateTransaction(blockCtx, preparedAccount, preparedMessage, params.transactionOptions())
 	if err != nil {
 		b.sendError(client, req.ID, "emulation failed: "+err.Error())
 		return

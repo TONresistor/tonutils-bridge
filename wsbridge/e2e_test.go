@@ -1861,9 +1861,10 @@ func TestE2E_LiteSendReal(t *testing.T) {
 		boc := buildTransferBOC(t, privKey, addr, seqno, uninit)
 		var resp e2eResponse
 		for i := 0; i < 5; i++ {
-			resp = e2eCall(t, c, "lite.emulateTransaction", map[string]string{
-				"address": addr.String(),
-				"boc":     boc,
+			resp = e2eCall(t, c, "lite.emulateTransaction", map[string]any{
+				"address":       addr.String(),
+				"boc":           boc,
+				"ignore_chksig": true,
 			})
 			if resp.Error == nil {
 				break
@@ -1875,7 +1876,7 @@ func TestE2E_LiteSendReal(t *testing.T) {
 			time.Sleep(2 * time.Second)
 		}
 		if resp.Error != nil {
-			t.Skipf("[SKIP] lite.emulateTransaction — unavailable (uninit wallet or liteserver): %s", resp.Error.Message)
+			t.Skipf("[SKIP] lite.emulateTransaction — liteserver unavailable: %s", resp.Error.Message)
 		}
 		result := e2eRequireResult(t, resp, "lite.emulateTransaction")
 		if _, ok := result["total_fees"]; !ok {
