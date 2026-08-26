@@ -582,7 +582,7 @@ func TestE2E_Lite(t *testing.T) {
 	})
 
 	t.Run("emulateMessage", func(t *testing.T) {
-		emptyBody := cell.BeginCell().EndCell().ToBOCWithFlags(false)
+		emptyBody := cell.BeginCell().EndCell().ToBOCWithOptions(cell.BOCSerializeOptions{})
 		params := map[string]any{
 			"address": testAddr,
 			"type":    "internal",
@@ -1772,7 +1772,7 @@ func buildTransferBOC(t *testing.T, privKey ed25519.PrivateKey, addr *address.Ad
 	if err != nil {
 		t.Fatalf("failed to serialize external message to cell: %v", err)
 	}
-	boc := msgCell.ToBOCWithFlags(false)
+	boc := msgCell.ToBOCWithOptions(cell.BOCSerializeOptions{})
 	return base64.StdEncoding.EncodeToString(boc)
 }
 

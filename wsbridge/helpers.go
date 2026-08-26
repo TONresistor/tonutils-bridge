@@ -153,7 +153,7 @@ func serializeStackValue(item any) any {
 		if v == nil {
 			return nil
 		}
-		return base64.StdEncoding.EncodeToString(v.ToBOCWithFlags(false))
+		return base64.StdEncoding.EncodeToString(v.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 	case *cell.Slice:
 		if v == nil {
 			return nil
@@ -162,7 +162,7 @@ func serializeStackValue(item any) any {
 		if err != nil {
 			return nil
 		}
-		return base64.StdEncoding.EncodeToString(c.ToBOCWithFlags(false))
+		return base64.StdEncoding.EncodeToString(c.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 	case []any:
 		return serializeStack(v)
 	case tuple.Tuple:
@@ -307,7 +307,7 @@ func serializeMessage(msg *tlb.Message) map[string]any {
 
 	// Serialize body as base64 BOC
 	if payload := msg.Msg.Payload(); payload != nil {
-		boc := payload.ToBOCWithFlags(false)
+		boc := payload.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		m["body"] = base64.StdEncoding.EncodeToString(boc)
 	} else {
 		m["body"] = ""

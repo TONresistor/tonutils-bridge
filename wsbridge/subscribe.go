@@ -16,6 +16,7 @@ import (
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
 func (b *WSBridge) handleSubscribeTransactions(client *wsClient, req *WSRequest) {
@@ -523,7 +524,7 @@ func (b *WSBridge) handleSubscribeConfigChanges(client *wsClient, req *WSRequest
 	for _, id := range params.Params {
 		c := cfg.Get(id)
 		if c != nil {
-			cache[id] = c.ToBOCWithFlags(false)
+			cache[id] = c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		}
 	}
 
@@ -561,7 +562,7 @@ func (b *WSBridge) handleSubscribeConfigChanges(client *wsClient, req *WSRequest
 			newCell := newCfg.Get(id)
 			var newBOC []byte
 			if newCell != nil {
-				newBOC = newCell.ToBOCWithFlags(false)
+				newBOC = newCell.ToBOCWithOptions(cell.BOCSerializeOptions{})
 			}
 
 			oldBOC := cache[id]

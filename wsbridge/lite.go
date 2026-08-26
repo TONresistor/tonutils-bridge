@@ -97,12 +97,12 @@ func (b *WSBridge) handleGetAccountState(client *wsClient, req *WSRequest) {
 	}
 
 	if acc.Code != nil {
-		boc := acc.Code.ToBOCWithFlags(false)
+		boc := acc.Code.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		result["code"] = base64.StdEncoding.EncodeToString(boc)
 	}
 
 	if acc.Data != nil {
-		boc := acc.Data.ToBOCWithFlags(false)
+		boc := acc.Data.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		result["data"] = base64.StdEncoding.EncodeToString(boc)
 	}
 
@@ -351,10 +351,10 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		"out_messages": []any{},
 	}
 	if res.Committed && res.Data != nil {
-		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithFlags(false))
+		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 	}
 	if res.Actions != nil {
-		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithFlags(false))
+		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 		result["out_messages"] = parseOutActions(res.Actions)
 	}
 
@@ -605,7 +605,7 @@ func parseOutActions(actions *cell.Cell) []any {
 							}
 							entry["value"] = im.Amount.Nano().String()
 							if im.Body != nil {
-								entry["body"] = base64.StdEncoding.EncodeToString(im.Body.ToBOCWithFlags(false))
+								entry["body"] = base64.StdEncoding.EncodeToString(im.Body.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 							}
 						} else {
 							entry["type"] = "external_out"
@@ -1015,7 +1015,7 @@ func (b *WSBridge) handleGetBlockchainConfig(client *wsClient, req *WSRequest) {
 		for _, id := range params.Params {
 			c := cfg.Get(id)
 			if c != nil {
-				boc := c.ToBOCWithFlags(false)
+				boc := c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 				result[fmt.Sprintf("%d", id)] = base64.StdEncoding.EncodeToString(boc)
 			} else {
 				result[fmt.Sprintf("%d", id)] = nil
@@ -1023,7 +1023,7 @@ func (b *WSBridge) handleGetBlockchainConfig(client *wsClient, req *WSRequest) {
 		}
 	} else {
 		for id, c := range cfg.All() {
-			boc := c.ToBOCWithFlags(false)
+			boc := c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 			result[fmt.Sprintf("%d", id)] = base64.StdEncoding.EncodeToString(boc)
 		}
 	}
@@ -1209,7 +1209,7 @@ func (b *WSBridge) handleGetBlockData(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	boc := cl.ToBOCWithFlags(false)
+	boc := cl.ToBOCWithOptions(cell.BOCSerializeOptions{})
 	b.sendResult(client, req.ID, map[string]any{
 		"boc": base64.StdEncoding.EncodeToString(boc),
 	})
@@ -1259,7 +1259,7 @@ func (b *WSBridge) handleGetBlockHeader(client *wsClient, req *WSRequest) {
 		"seqno":      block.SeqNo,
 		"root_hash":  hex.EncodeToString(block.RootHash),
 		"file_hash":  hex.EncodeToString(block.FileHash),
-		"header_boc": base64.StdEncoding.EncodeToString(headerCell.ToBOCWithFlags(false)),
+		"header_boc": base64.StdEncoding.EncodeToString(headerCell.ToBOCWithOptions(cell.BOCSerializeOptions{})),
 	})
 }
 
@@ -1311,7 +1311,7 @@ func (b *WSBridge) handleGetLibraries(client *wsClient, req *WSRequest) {
 		if c == nil {
 			libraries[i] = nil
 		} else {
-			boc := c.ToBOCWithFlags(false)
+			boc := c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 			libraries[i] = map[string]any{
 				"hash": params.Hashes[i],
 				"boc":  base64.StdEncoding.EncodeToString(boc),

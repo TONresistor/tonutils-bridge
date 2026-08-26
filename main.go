@@ -135,7 +135,7 @@ func run(cfg *Config) error {
 	defer wsGate.Close()
 
 	// 7. Create and start bridge
-	wsAPI := ton.NewAPIClient(connPool, ton.ProofCheckPolicyFast).WithRetry(2).WithTimeout(5 * time.Second)
+	wsAPI := ton.NewAPIClient(connPool, ton.ProofCheckPolicyFast).WithRetryTimeout(2, 5*time.Second)
 	bridge := wsbridge.NewWSBridge(cfg.ToWSBridgeConfig(), dhtClient, wsAPI, dnsClient, wsGate, privKey)
 
 	log.Info().Str("addr", cfg.Listen).Msg("Starting WebSocket bridge")
@@ -288,7 +288,7 @@ func initDNSResolver(ctx context.Context, cfg *liteclient.GlobalConfig) (*litecl
 		return nil, nil, err
 	}
 
-	api := ton.NewAPIClient(pool).WithTimeout(5 * time.Second).WithRetry()
+	api := ton.NewAPIClient(pool).WithRetryTimeout(0, 5*time.Second)
 
 	var root *address.Address
 	var err error
