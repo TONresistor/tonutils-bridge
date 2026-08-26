@@ -1432,6 +1432,7 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 }
 
 func (b *WSBridge) waitForExternalMessage(ctx context.Context, ext *tlb.ExternalMessage, block *ton.BlockIDExt, acc *tlb.Account) (*tlb.Transaction, *ton.BlockIDExt, error) {
+nextBlock:
 	for ctx.Err() == nil {
 		newBlock, err := b.api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(ctx)
 		if err != nil {
@@ -1454,7 +1455,7 @@ func (b *WSBridge) waitForExternalMessage(ctx context.Context, ext *tlb.External
 		for ctx.Err() == nil && lastLT != 0 {
 			txList, err := b.api.WaitForBlock(block.SeqNo).ListTransactions(ctx, ext.DstAddr, 20, lastLT, lastHash)
 			if err != nil {
-				continue
+				continue nextBlock
 			}
 
 			sawPrevious := false

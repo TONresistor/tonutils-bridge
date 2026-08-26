@@ -3,9 +3,12 @@ package wsbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
+	"time"
 
+	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -282,5 +285,76 @@ func TestBlockMethodsUseVerifiedTonutilsHelpers(t *testing.T) {
 	_ = rpc(t, conn, "header", "lite.getBlockHeader", params)
 	if !api.headerCalled {
 		t.Fatal("lite.getBlockHeader bypassed GetBlockHeader")
+	}
+}
+
+type transientTransactionListAPI struct {
+	ton.APIClientWrapped
+	masterCalls int
+	listCalls   int
+	account     *tlb.Account
+	tx          *tlb.Transaction
+}
+
+func (a *transientTransactionListAPI) WaitForBlock(uint32) ton.APIClientWrapped {
+	return a
+}
+
+func (a *transientTransactionListAPI) GetMasterchainInfo(context.Context) (*ton.BlockIDExt, error) {
+	a.masterCalls++
+	return &ton.BlockIDExt{SeqNo: uint32(10 + a.masterCalls)}, nil
+}
+
+func (a *transientTransactionListAPI) GetAccount(context.Context, *ton.BlockIDExt, *address.Address) (*tlb.Account, error) {
+	return a.account, nil
+}
+
+func (a *transientTransactionListAPI) ListTransactions(context.Context, *address.Address, uint32, uint64, []byte) ([]*tlb.Transaction, error) {
+	a.listCalls++
+	if a.masterCalls < 2 {
+		return nil, errors.New("transient liteserver error")
+	}
+	return []*tlb.Transaction{a.tx}, nil
+}
+
+func TestWaitForExternalMessageRetriesTransactionScanOnNextBlock(t *testing.T) {
+	body := cell.BeginCell().MustStoreUInt(0x1234, 16).EndCell()
+	destination := address.NewAddress(0, 0, make([]byte, 32))
+	previousHash := make([]byte, 32)
+	previousHash[0] = 1
+	latestHash := make([]byte, 32)
+	latestHash[0] = 2
+
+	tx := &tlb.Transaction{PrevTxLT: 1, PrevTxHash: previousHash}
+	tx.IO.In = &tlb.Message{
+		MsgType: tlb.MsgTypeExternalIn,
+		Msg:     &tlb.ExternalMessage{DstAddr: destination, Body: body},
+	}
+	api := &transientTransactionListAPI{
+		account: &tlb.Account{LastTxLT: 2, LastTxHash: latestHash},
+		tx:      tx,
+	}
+	bridge := testBridge()
+	bridge.api = api
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got, block, err := bridge.waitForExternalMessage(
+		ctx,
+		&tlb.ExternalMessage{DstAddr: destination, Body: body},
+		&ton.BlockIDExt{SeqNo: 10},
+		&tlb.Account{LastTxLT: 1, LastTxHash: previousHash},
+	)
+	if err != nil {
+		t.Fatalf("wait for external message: %v", err)
+	}
+	if got != tx {
+		t.Fatal("returned a different transaction")
+	}
+	if block == nil || block.SeqNo != 12 {
+		t.Fatalf("confirmed block = %#v, want seqno 12", block)
+	}
+	if api.masterCalls != 2 || api.listCalls != 2 {
+		t.Fatalf("master calls = %d, list calls = %d; want 2 and 2", api.masterCalls, api.listCalls)
 	}
 }
