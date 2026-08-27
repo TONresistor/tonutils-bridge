@@ -29,6 +29,14 @@ Error:
 | `-32602` | Invalid parameters |
 | `-32603` | Internal error |
 
+## Migrating from v0.4.0
+
+v0.5.0 intentionally changes three API behaviors:
+
+- `adnl.query`, `adnl.answer`, `overlay.query`, and `overlay.answer` now use boxed TL data by default. Set `raw: true` when using the legacy `ws.rawMessage` wrapper, and preserve the inbound `raw` value when answering.
+- `lite.findTxByInMsgHash` and `lite.findTxByOutMsgHash` now match the full serialized message hash instead of the message body hash.
+- `lite.getBlockHeader.header_boc` now contains the verified block header cell instead of the liteserver Merkle proof.
+
 ## Methods
 
 ### Subscriptions
