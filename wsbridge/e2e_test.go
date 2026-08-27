@@ -25,7 +25,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -38,13 +37,17 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
-	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/address"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
+
+type OverlayKey struct {
+	PaymentNode []byte `tl:"int256"`
+}
 
 // ---------------------------------------------------------------------------
 // TestMain — suppress zerolog noise from the internal bridge
@@ -52,7 +55,7 @@ import (
 
 func TestMain(m *testing.M) {
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	RegisterOverlayKey() // tests don't import adnl-tunnel, so register here
+	tl.Register(OverlayKey{}, "adnlTunnel.overlayKey paymentNode:int256 = adnlTunnel.OverlayKey")
 	os.Exit(m.Run())
 }
 
@@ -240,18 +243,17 @@ func e2eCallRetry(t *testing.T, c *websocket.Conn, method string, params interfa
 
 // Constants used across tests.
 const (
-	testAddr       = "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N"
-	hotWallet      = "UQDdb_AsWWNHRVKbmajVvu6p9sOKkYjmp-lqQk44IMisCnMY" // Telegram Wallet hot wallet (always active)
-	sbtAddr        = "EQDle-2qf9QJ9KIxmpqYzAyuyX61Bi8aKDwuJQZlTTxJqkTo" // Real SBT on mainnet
-	payChannelAddr = "EQA4Ntk6B2Sq-LbHoZ-11FFgr43o3dk5hS3w5G3OkOzHhQEG" // Payment channel on mainnet (may be a legacy contract)
-	usdtMaster     = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
-	nftCollection  = "EQDvRFMYLdxmvY3Tk-cfWMLqDnXF_EclO2Fp4wwj33WhlNFT"
+	testAddr      = "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N"
+	hotWallet     = "UQDdb_AsWWNHRVKbmajVvu6p9sOKkYjmp-lqQk44IMisCnMY" // Telegram Wallet hot wallet (always active)
+	sbtAddr       = "EQDle-2qf9QJ9KIxmpqYzAyuyX61Bi8aKDwuJQZlTTxJqkTo" // Real SBT on mainnet
+	usdtMaster    = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
+	nftCollection = "EQDvRFMYLdxmvY3Tk-cfWMLqDnXF_EclO2Fp4wwj33WhlNFT"
 	relayAddr     = "80.78.27.15:17330"
 	relayKey      = "0nAqzFCklgG1vJFgKHqU7Z87c7RHYn345e4jPnxqnxM="
 )
 
 // ---------------------------------------------------------------------------
-// TestE2E_Lite — 14 lite.* methods
+// TestE2E_Lite — 20 lite.* methods
 // ---------------------------------------------------------------------------
 
 func TestE2E_Lite(t *testing.T) {
@@ -442,8 +444,7 @@ func TestE2E_Lite(t *testing.T) {
 			t.Fatalf("[FAIL] lite.findTxByOutMsgHash — no transactions available for hot wallet")
 		}
 
-		// Find a transaction that has at least one out_msg with a body.
-		var bodyHash string
+		var messageHash string
 		for _, item := range txList {
 			tx, ok := item.(map[string]interface{})
 			if !ok {
@@ -457,38 +458,21 @@ func TestE2E_Lite(t *testing.T) {
 			if !ok {
 				continue
 			}
-			bodyB64, ok := outMsg["body"].(string)
-			if !ok || bodyB64 == "" {
-				continue
-			}
-			bodyBytes, err := base64.StdEncoding.DecodeString(bodyB64)
-			if err != nil {
-				continue
-			}
-			bodyCell, err := cell.FromBOC(bodyBytes)
-			if err != nil {
-				continue
-			}
-			bodyHash = hex.EncodeToString(bodyCell.Hash())
+			messageHash, _ = outMsg["hash"].(string)
 			break
 		}
-		if bodyHash == "" {
-			t.Fatalf("[FAIL] lite.findTxByOutMsgHash — no transaction with out_msg body found in recent txs")
+		if messageHash == "" {
+			t.Fatalf("[FAIL] lite.findTxByOutMsgHash — no transaction with out_msg hash found in recent txs")
 		}
 
 		resp := e2eCall(t, c, "lite.findTxByOutMsgHash", map[string]interface{}{
 			"address":  hotWallet,
-			"msg_hash": bodyHash,
+			"msg_hash": messageHash,
 		})
 		if resp.Error != nil {
-			if resp.Error.Code == -32601 {
-				t.Fatalf("[FAIL] lite.findTxByOutMsgHash — method not found (code -32601): %s", resp.Error.Message)
-			}
-			// May fail if the tx is too old and pruned from liteserver
-			t.Logf("[PASS] lite.findTxByOutMsgHash — lookup with real hash %s: %s", truncKey(bodyHash), resp.Error.Message)
-		} else {
-			t.Logf("[PASS] lite.findTxByOutMsgHash — found tx at lt %s with out_msg body hash %s", resp.Result["lt"], truncKey(bodyHash))
+			t.Fatalf("[FAIL] lite.findTxByOutMsgHash — lookup failed for %s: %s", truncKey(messageHash), resp.Error.Message)
 		}
+		t.Logf("[PASS] lite.findTxByOutMsgHash — found tx at lt %s with out_msg hash %s", resp.Result["lt"], truncKey(messageHash))
 	})
 
 	t.Run("getBlockData", func(t *testing.T) {
@@ -559,8 +543,7 @@ func TestE2E_Lite(t *testing.T) {
 			t.Fatalf("[FAIL] lite.findTxByInMsgHash — no transactions available for hot wallet")
 		}
 
-		// Find a transaction that has an in_msg with a body.
-		var bodyHash string
+		var messageHash string
 		for _, item := range txList {
 			tx, ok := item.(map[string]interface{})
 			if !ok {
@@ -570,35 +553,21 @@ func TestE2E_Lite(t *testing.T) {
 			if !ok {
 				continue
 			}
-			bodyB64, ok := inMsg["body"].(string)
-			if !ok || bodyB64 == "" {
-				continue
-			}
-			bodyBytes, err := base64.StdEncoding.DecodeString(bodyB64)
-			if err != nil {
-				continue
-			}
-			bodyCell, err := cell.FromBOC(bodyBytes)
-			if err != nil {
-				continue
-			}
-			bodyHash = hex.EncodeToString(bodyCell.Hash())
+			messageHash, _ = inMsg["hash"].(string)
 			break
 		}
-		if bodyHash == "" {
-			t.Fatalf("[FAIL] lite.findTxByInMsgHash — no transaction with in_msg body found in recent txs")
+		if messageHash == "" {
+			t.Fatalf("[FAIL] lite.findTxByInMsgHash — no transaction with in_msg hash found in recent txs")
 		}
 
 		resp := e2eCall(t, c, "lite.findTxByInMsgHash", map[string]interface{}{
 			"address":  hotWallet,
-			"msg_hash": bodyHash,
+			"msg_hash": messageHash,
 		})
 		if resp.Error != nil {
-			// May fail if the tx is too old and pruned from liteserver
-			t.Logf("[PASS] lite.findTxByInMsgHash — lookup with real hash %s: %s", truncKey(bodyHash), resp.Error.Message)
-		} else {
-			t.Logf("[PASS] lite.findTxByInMsgHash — found tx at lt %s with body hash %s", resp.Result["lt"], truncKey(bodyHash))
+			t.Fatalf("[FAIL] lite.findTxByInMsgHash — lookup failed for %s: %s", truncKey(messageHash), resp.Error.Message)
 		}
+		t.Logf("[PASS] lite.findTxByInMsgHash — found tx at lt %s with message hash %s", resp.Result["lt"], truncKey(messageHash))
 	})
 
 	t.Run("sendAndWatch_invalidBOC", func(t *testing.T) {
@@ -613,7 +582,7 @@ func TestE2E_Lite(t *testing.T) {
 	})
 
 	t.Run("emulateMessage", func(t *testing.T) {
-		emptyBody := cell.BeginCell().EndCell().ToBOCWithFlags(false)
+		emptyBody := cell.BeginCell().EndCell().ToBOCWithOptions(cell.BOCSerializeOptions{})
 		params := map[string]any{
 			"address": testAddr,
 			"type":    "internal",
@@ -664,7 +633,7 @@ func TestE2E_Lite(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestE2E_DHT — 4 dht.* methods
+// TestE2E_DHT — 6 dht.* methods
 // ---------------------------------------------------------------------------
 
 func TestE2E_DHT(t *testing.T) {
@@ -679,16 +648,7 @@ func TestE2E_DHT(t *testing.T) {
 	}
 	overlayKeyB64 := base64.StdEncoding.EncodeToString(overlayKey)
 
-	// Compute the relay ADNL ID: tl.Hash(pub.ed25519{key})
-	relayKeyBytes, err := base64.StdEncoding.DecodeString(relayKey)
-	if err != nil {
-		t.Fatalf("failed to decode relay key: %v", err)
-	}
-	adnlID, err := tl.Hash(keys.PublicKeyED25519{Key: relayKeyBytes})
-	if err != nil {
-		t.Fatalf("failed to compute ADNL ID: %v", err)
-	}
-	adnlIDB64 := base64.StdEncoding.EncodeToString(adnlID)
+	var discoveredADNLID string
 
 	t.Run("findTunnelNodes", func(t *testing.T) {
 		resp := e2eCallRetry(t, c, "dht.findTunnelNodes", nil, 2)
@@ -703,6 +663,14 @@ func TestE2E_DHT(t *testing.T) {
 		}
 		result := e2eRequireResult(t, resp, "dht.findTunnelNodes")
 		count, _ := result["count"].(float64)
+		if relays, ok := result["relays"].([]interface{}); ok && len(relays) > 0 {
+			if relay, ok := relays[0].(map[string]interface{}); ok {
+				discoveredADNLID, _ = relay["adnl_id"].(string)
+				if id, _ := relay["id"].(string); id == "" || discoveredADNLID == "" || id == discoveredADNLID {
+					t.Fatalf("[FAIL] dht.findTunnelNodes — invalid id/adnl_id fields: %v", relay)
+				}
+			}
+		}
 		t.Logf("[PASS] dht.findTunnelNodes — %.0f relays found", count)
 	})
 
@@ -719,11 +687,14 @@ func TestE2E_DHT(t *testing.T) {
 	})
 
 	t.Run("findAddresses", func(t *testing.T) {
+		if discoveredADNLID == "" {
+			t.Skip("no live tunnel relay returned by DHT")
+		}
 		resp := e2eCallRetry(t, c, "dht.findAddresses", map[string]string{
-			"key": adnlIDB64,
+			"key": discoveredADNLID,
 		}, 2)
 		e2eRequireResult(t, resp, "dht.findAddresses")
-		t.Logf("[PASS] dht.findAddresses — resolved ADNL ID %s", truncKey(adnlIDB64))
+		t.Logf("[PASS] dht.findAddresses — resolved ADNL ID %s", truncKey(discoveredADNLID))
 	})
 
 	t.Run("storeAddress", func(t *testing.T) {
@@ -789,13 +760,16 @@ func TestE2E_DHT(t *testing.T) {
 	})
 
 	t.Run("findValue", func(t *testing.T) {
+		if discoveredADNLID == "" {
+			t.Skip("no live tunnel relay returned by DHT")
+		}
 		resp := e2eCallRetry(t, c, "dht.findValue", map[string]interface{}{
-			"key_id": adnlIDB64,
+			"key_id": discoveredADNLID,
 			"name":   "address",
 			"index":  0,
 		}, 2)
 		e2eRequireResult(t, resp, "dht.findValue")
-		t.Logf("[PASS] dht.findValue — value found for ADNL ID %s", truncKey(adnlIDB64))
+		t.Logf("[PASS] dht.findValue — value found for ADNL ID %s", truncKey(discoveredADNLID))
 	})
 }
 
@@ -1190,7 +1164,7 @@ func TestE2E_ADNL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestE2E_Overlay — 7 overlay.* methods
+// TestE2E_Overlay — 9 overlay.* methods
 // ---------------------------------------------------------------------------
 
 func TestE2E_Overlay(t *testing.T) {
@@ -1266,6 +1240,21 @@ func TestE2E_Overlay(t *testing.T) {
 				t.Fatalf("[FAIL] overlay.sendMessage — expected sent:true, got %v", result["sent"])
 			}
 			t.Logf("[PASS] overlay.sendMessage_emptyOverlay — broadcast sent to overlay %s", truncKey(realOverlayID))
+		}
+	})
+
+	t.Run("sendRaw", func(t *testing.T) {
+		payload, err := tl.Serialize(TonnetGetTime{}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := e2eCall(t, c, "overlay.sendRaw", map[string]interface{}{
+			"overlay_id": realOverlayID,
+			"data":       base64.StdEncoding.EncodeToString(payload),
+		})
+		result := e2eRequireResult(t, resp, "overlay.sendRaw")
+		if result["sent"] != true {
+			t.Fatalf("[FAIL] overlay.sendRaw — expected sent:true, got %v", result)
 		}
 	})
 
@@ -1674,18 +1663,14 @@ func TestE2E_Payment(t *testing.T) {
 	c := e2eDial(t)
 
 	t.Run("getChannelState", func(t *testing.T) {
+		channelAddr := os.Getenv("PAYMENT_CHANNEL_ADDR")
+		if channelAddr == "" {
+			t.Skip("set PAYMENT_CHANNEL_ADDR to a current ton-payment-network v1.3.1 channel")
+		}
 		resp := e2eCall(t, c, "payment.getChannelState", map[string]string{
-			"address": payChannelAddr,
+			"address": channelAddr,
 		})
-		// payChannelAddr may be a legacy channel that the ton-payment-network
-		// v1.3.0 parser cannot read; accept either a parsed result or a clean error.
-		if resp.Error != nil {
-			t.Logf("[PASS] payment.getChannelState — clean error %d: %s", resp.Error.Code, resp.Error.Message)
-			return
-		}
-		if resp.Result == nil {
-			t.Fatalf("[FAIL] payment.getChannelState — neither result nor error")
-		}
+		e2eRequireResult(t, resp, "payment.getChannelState")
 		channelID, _ := resp.Result["channel_id"].(string)
 		status, _ := resp.Result["status"].(float64)
 		seqno, _ := resp.Result["committed_seqno"].(float64)
@@ -1787,7 +1772,7 @@ func buildTransferBOC(t *testing.T, privKey ed25519.PrivateKey, addr *address.Ad
 	if err != nil {
 		t.Fatalf("failed to serialize external message to cell: %v", err)
 	}
-	boc := msgCell.ToBOCWithFlags(false)
+	boc := msgCell.ToBOCWithOptions(cell.BOCSerializeOptions{})
 	return base64.StdEncoding.EncodeToString(boc)
 }
 
@@ -1876,9 +1861,10 @@ func TestE2E_LiteSendReal(t *testing.T) {
 		boc := buildTransferBOC(t, privKey, addr, seqno, uninit)
 		var resp e2eResponse
 		for i := 0; i < 5; i++ {
-			resp = e2eCall(t, c, "lite.emulateTransaction", map[string]string{
-				"address": addr.String(),
-				"boc":     boc,
+			resp = e2eCall(t, c, "lite.emulateTransaction", map[string]any{
+				"address":       addr.String(),
+				"boc":           boc,
+				"ignore_chksig": true,
 			})
 			if resp.Error == nil {
 				break
@@ -1890,7 +1876,7 @@ func TestE2E_LiteSendReal(t *testing.T) {
 			time.Sleep(2 * time.Second)
 		}
 		if resp.Error != nil {
-			t.Skipf("[SKIP] lite.emulateTransaction — unavailable (uninit wallet or liteserver): %s", resp.Error.Message)
+			t.Skipf("[SKIP] lite.emulateTransaction — liteserver unavailable: %s", resp.Error.Message)
 		}
 		result := e2eRequireResult(t, resp, "lite.emulateTransaction")
 		if _, ok := result["total_fees"]; !ok {

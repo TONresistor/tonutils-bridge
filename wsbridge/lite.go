@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"sync/atomic"
@@ -61,7 +62,6 @@ func (b *WSBridge) handleGetAccountState(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
 		return
 	}
-
 	acc, err := b.api.GetAccount(ctx, block, addr)
 	if err != nil {
 		b.sendError(client, req.ID, "failed to get account: "+err.Error())
@@ -97,12 +97,12 @@ func (b *WSBridge) handleGetAccountState(client *wsClient, req *WSRequest) {
 	}
 
 	if acc.Code != nil {
-		boc := acc.Code.ToBOCWithFlags(false)
+		boc := acc.Code.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		result["code"] = base64.StdEncoding.EncodeToString(boc)
 	}
 
 	if acc.Data != nil {
-		boc := acc.Data.ToBOCWithFlags(false)
+		boc := acc.Data.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		result["data"] = base64.StdEncoding.EncodeToString(boc)
 	}
 
@@ -111,9 +111,9 @@ func (b *WSBridge) handleGetAccountState(client *wsClient, req *WSRequest) {
 
 func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 	var params struct {
-		Address string        `json:"address"`
-		Method  string        `json:"method"`
-		Params  []any `json:"params"`
+		Address string `json:"address"`
+		Method  string `json:"method"`
+		Params  []any  `json:"params"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
@@ -138,52 +138,12 @@ func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 	// Convert JSON params to RunGetMethod args
 	var methodParams []any
 	for i, p := range params.Params {
-		switch v := p.(type) {
-		case float64:
-			methodParams = append(methodParams, new(big.Int).SetInt64(int64(v)))
-		case string:
-			// Try to parse as big.Int
-			bi := new(big.Int)
-			if _, ok := bi.SetString(v, 10); ok {
-				methodParams = append(methodParams, bi)
-			} else {
-				b.sendError(client, req.ID, fmt.Sprintf("unsupported param at index %d: string is not a valid integer", i), -32602)
-				return
-			}
-		case map[string]any:
-			// Typed envelope for cell/slice params:
-			//   {"type": "slice", "boc": "<base64 BOC>"}
-			//   {"type": "cell",  "boc": "<base64 BOC>"}
-			kind, _ := v["type"].(string)
-			bocB64, _ := v["boc"].(string)
-			if bocB64 == "" || (kind != "slice" && kind != "cell") {
-				b.sendError(client, req.ID, fmt.Sprintf("unsupported object param at index %d: expected {type:'slice'|'cell', boc:<base64>}", i), -32602)
-				return
-			}
-			bocBytes, err := decodeBase64(bocB64)
-			if err != nil {
-				b.sendError(client, req.ID, fmt.Sprintf("invalid base64 boc at index %d: %s", i, err.Error()), -32602)
-				return
-			}
-			c, err := cell.FromBOC(bocBytes)
-			if err != nil {
-				b.sendError(client, req.ID, fmt.Sprintf("invalid BOC at index %d: %s", i, err.Error()), -32602)
-				return
-			}
-			if kind == "slice" {
-				sl, err := c.BeginParse()
-				if err != nil {
-					b.sendError(client, req.ID, fmt.Sprintf("invalid slice param at index %d: %s", i, err.Error()), -32602)
-					return
-				}
-				methodParams = append(methodParams, sl)
-			} else {
-				methodParams = append(methodParams, c)
-			}
-		default:
-			b.sendError(client, req.ID, fmt.Sprintf("unsupported param type at index %d", i), -32602)
+		converted, err := convertRunMethodParam(p)
+		if err != nil {
+			b.sendError(client, req.ID, fmt.Sprintf("unsupported param at index %d: %s", i, err.Error()), -32602)
 			return
 		}
+		methodParams = append(methodParams, converted)
 	}
 
 	res, err := b.api.RunGetMethod(ctx, block, addr, params.Method, methodParams...)
@@ -200,6 +160,58 @@ func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 		"exit_code": 0,
 		"stack":     stack,
 	})
+}
+
+func convertRunMethodParam(value any) (any, error) {
+	switch v := value.(type) {
+	case nil:
+		return nil, nil
+	case float64:
+		if math.Trunc(v) != v || v > 1<<53 || v < -(1<<53) {
+			return nil, fmt.Errorf("JSON number must be a safe integer; use a decimal string for larger values")
+		}
+		return new(big.Int).SetInt64(int64(v)), nil
+	case string:
+		bi := new(big.Int)
+		if _, ok := bi.SetString(v, 10); !ok {
+			return nil, fmt.Errorf("string is not a valid decimal integer")
+		}
+		return bi, nil
+	case []any:
+		items := make([]any, len(v))
+		for i, item := range v {
+			converted, err := convertRunMethodParam(item)
+			if err != nil {
+				return nil, fmt.Errorf("tuple item %d: %w", i, err)
+			}
+			items[i] = converted
+		}
+		return items, nil
+	case map[string]any:
+		kind, _ := v["type"].(string)
+		bocB64, _ := v["boc"].(string)
+		if bocB64 == "" || (kind != "slice" && kind != "cell") {
+			return nil, fmt.Errorf("expected {type:'slice'|'cell', boc:<base64>}")
+		}
+		bocBytes, err := decodeBase64(bocB64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 BOC: %w", err)
+		}
+		c, err := cell.FromBOC(bocBytes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BOC: %w", err)
+		}
+		if kind == "cell" {
+			return c, nil
+		}
+		slice, err := c.BeginParse()
+		if err != nil {
+			return nil, fmt.Errorf("invalid slice: %w", err)
+		}
+		return slice, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %T", value)
+	}
 }
 
 // handleEmulateMessage runs a message locally against the target account's real
@@ -265,6 +277,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
 		return
 	}
+	networkNow, err := b.api.GetTime(ctx)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get network time: "+err.Error())
+		return
+	}
 
 	acc, err := b.api.GetAccount(ctx, block, addr)
 	if err != nil {
@@ -281,6 +298,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
 		return
 	}
+	preparedCfg, err := tvm.PrepareBlockchainConfig(bcCfg.Root)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare blockchain config: "+err.Error())
+		return
+	}
 
 	balance := big.NewInt(0)
 	if acc.State != nil && acc.State.IsValid {
@@ -288,11 +310,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 	}
 
 	emCfg := tvm.MessageEmulationConfig{
-		Address:    addr,
-		Now:        uint32(time.Now().Unix()),
-		Balance:    balance,
-		ConfigRoot: bcCfg.Root,
-		RandSeed:   make([]byte, 32),
+		Address:  addr,
+		Now:      networkNow,
+		Balance:  balance,
+		Config:   preparedCfg,
+		RandSeed: make([]byte, 32),
 	}
 
 	machine := tvm.NewTVM()
@@ -329,10 +351,10 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		"out_messages": []any{},
 	}
 	if res.Committed && res.Data != nil {
-		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithFlags(false))
+		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 	}
 	if res.Actions != nil {
-		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithFlags(false))
+		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 		result["out_messages"] = parseOutActions(res.Actions)
 	}
 
@@ -342,18 +364,41 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 // handleEmulateTransaction runs a FULL transaction locally against the target
 // account's real on-chain state using the native Go TVM, without broadcasting.
 // Unlike lite.emulateMessage (compute-phase only), it executes every phase
-// (storage, credit, compute, action) and reports the real fee breakdown and
-// total fees — the preflight a wallet needs before lite.sendMessage.
+// (storage, credit, compute, action) and reports the emulated fee breakdown and
+// total fees — a preflight before lite.sendMessage.
 //
 // `boc` must be a FULL message cell (an external-in message, as passed to
-// lite.sendMessage; or a full internal message). The account must be initialized.
+// lite.sendMessage; or a full internal message). The account must exist, but it
+// may still be uninitialized when the message carries its StateInit.
 // The TVM emulator is alpha upstream; results may differ in edge cases.
-func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
-	var params struct {
-		Address string `json:"address"`
-		BOC     string `json:"boc"`
+type emulateTransactionParams struct {
+	Address      string `json:"address"`
+	BOC          string `json:"boc"`
+	IgnoreChkSig bool   `json:"ignore_chksig"`
+}
+
+func parseEmulateTransactionParams(raw json.RawMessage) (emulateTransactionParams, error) {
+	var params emulateTransactionParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return emulateTransactionParams{}, err
 	}
-	if err := json.Unmarshal(req.Params, &params); err != nil {
+	return params, nil
+}
+
+func (p emulateTransactionParams) transactionOptions() tvm.TransactionOptions {
+	return tvm.TransactionOptions{SignatureCheckAlwaysSucceed: p.IgnoreChkSig}
+}
+
+func accountStateForTransactionEmulation(acc *tlb.Account) (*tlb.AccountState, error) {
+	if acc == nil || acc.State == nil || !acc.State.IsValid {
+		return nil, fmt.Errorf("account does not exist, cannot emulate")
+	}
+	return acc.State, nil
+}
+
+func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
+	params, err := parseEmulateTransactionParams(req.Params)
+	if err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
 		return
 	}
@@ -383,35 +428,31 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
 		return
 	}
+	networkNow, err := b.api.GetTime(ctx)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get network time: "+err.Error())
+		return
+	}
 
 	acc, err := b.api.GetAccount(ctx, block, addr)
 	if err != nil {
 		b.sendError(client, req.ID, "failed to get account: "+err.Error())
 		return
 	}
-	if acc.Code == nil || acc.Data == nil {
-		b.sendError(client, req.ID, "account is not initialized, cannot emulate", -32602)
+	accountState, err := accountStateForTransactionEmulation(acc)
+	if err != nil {
+		b.sendError(client, req.ID, err.Error(), -32602)
 		return
 	}
 
-	// EmulateTransaction needs the raw account cell to build the ShardAccount
-	// input; GetAccount only returns the parsed form, so fetch the cell directly.
-	var accResp tl.Serializable
-	if err = b.api.Client().QueryLiteserver(ctx, ton.GetAccountState{
-		ID:      block,
-		Account: ton.AccountID{Workchain: addr.Workchain(), ID: addr.Data()},
-	}, &accResp); err != nil {
-		b.sendError(client, req.ID, "failed to get account state: "+err.Error())
-		return
-	}
-	accState, ok := accResp.(ton.AccountState)
-	if !ok || accState.State == nil {
-		b.sendError(client, req.ID, "account state unavailable for emulation")
+	accountCell, err := accountState.ToCell()
+	if err != nil {
+		b.sendError(client, req.ID, "failed to serialize verified account state: "+err.Error())
 		return
 	}
 
 	shard := &tlb.ShardAccount{
-		Account:       accState.State,
+		Account:       accountCell,
 		LastTransHash: acc.LastTxHash,
 		LastTransLT:   acc.LastTxLT,
 	}
@@ -421,19 +462,31 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
 		return
 	}
-
-	balance := big.NewInt(0)
-	if acc.State != nil && acc.State.IsValid {
-		balance = acc.State.Balance.Nano()
+	preparedCfg, err := tvm.PrepareBlockchainConfig(bcCfg.Root)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare blockchain config: "+err.Error())
+		return
+	}
+	blockCtx, err := preparedCfg.NewBlockContext(tvm.BlockOptions{
+		Now:      networkNow,
+		RandSeed: make([]byte, 32),
+	})
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare block context: "+err.Error())
+		return
+	}
+	preparedAccount, err := tvm.PrepareAccount(shard, addr)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare account: "+err.Error())
+		return
+	}
+	preparedMessage, err := tvm.PrepareMessage(msgCell)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare message: "+err.Error(), -32602)
+		return
 	}
 
-	res, err := tvm.NewTVM().EmulateTransaction(shard, msgCell, tvm.TransactionEmulationConfig{
-		Address:    addr,
-		Now:        uint32(time.Now().Unix()),
-		Balance:    balance,
-		ConfigRoot: bcCfg.Root,
-		RandSeed:   make([]byte, 32),
-	})
+	res, err := tvm.NewTVM().EmulateTransaction(blockCtx, preparedAccount, preparedMessage, params.transactionOptions())
 	if err != nil {
 		b.sendError(client, req.ID, "emulation failed: "+err.Error())
 		return
@@ -448,10 +501,15 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		"gas_used":   res.GasUsed,
 		"total_fees": "0",
 	}
-	if res.Transaction != nil {
-		result["transaction"] = serializeTransaction(res.Transaction)
-		result["total_fees"] = res.Transaction.TotalFees.Coins.Nano().String()
-		summarizeTxPhases(res.Transaction, result)
+	if res.TransactionCell != nil {
+		tx, parseErr := res.ParseTransaction()
+		if parseErr != nil {
+			b.sendError(client, req.ID, "failed to parse emulated transaction: "+parseErr.Error())
+			return
+		}
+		result["transaction"] = serializeTransaction(tx)
+		result["total_fees"] = tx.TotalFees.Coins.Nano().String()
+		summarizeTxPhases(tx, result)
 	}
 
 	b.sendResult(client, req.ID, result)
@@ -547,7 +605,7 @@ func parseOutActions(actions *cell.Cell) []any {
 							}
 							entry["value"] = im.Amount.Nano().String()
 							if im.Body != nil {
-								entry["body"] = base64.StdEncoding.EncodeToString(im.Body.ToBOCWithFlags(false))
+								entry["body"] = base64.StdEncoding.EncodeToString(im.Body.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 							}
 						} else {
 							entry["type"] = "external_out"
@@ -686,6 +744,10 @@ func (b *WSBridge) handleGetTransactions(client *wsClient, req *WSRequest) {
 	var startLT uint64
 	var startHash []byte
 
+	if (params.LastLT == "") != (params.LastHash == "") {
+		b.sendError(client, req.ID, "last_lt and last_hash must be provided together", -32602)
+		return
+	}
 	if params.LastLT != "" && params.LastHash != "" {
 		startLT, err = strconv.ParseUint(params.LastLT, 10, 64)
 		if err != nil {
@@ -695,6 +757,10 @@ func (b *WSBridge) handleGetTransactions(client *wsClient, req *WSRequest) {
 		startHash, err = hex.DecodeString(params.LastHash)
 		if err != nil {
 			b.sendError(client, req.ID, "invalid last_hash hex: "+err.Error(), -32602)
+			return
+		}
+		if len(startHash) != 32 {
+			b.sendError(client, req.ID, "last_hash must be 32 bytes", -32602)
 			return
 		}
 	} else {
@@ -798,6 +864,10 @@ func (b *WSBridge) handleGetBlockTransactions(client *wsClient, req *WSRequest) 
 		Shard     string `json:"shard"`
 		Seqno     uint32 `json:"seqno"`
 		Count     uint32 `json:"count"`
+		After     *struct {
+			Account string `json:"account"`
+			LT      string `json:"lt"`
+		} `json:"after,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
@@ -824,7 +894,28 @@ func (b *WSBridge) handleGetBlockTransactions(client *wsClient, req *WSRequest) 
 		return
 	}
 
-	txList, incomplete, err := b.api.GetBlockTransactionsV2(ctx, block, params.Count)
+	var after *ton.TransactionID3
+	if params.After != nil {
+		account, decodeErr := hex.DecodeString(params.After.Account)
+		if decodeErr != nil || len(account) != 32 {
+			b.sendError(client, req.ID, "invalid after.account: expected 32-byte hex", -32602)
+			return
+		}
+		lt, parseErr := strconv.ParseUint(params.After.LT, 10, 64)
+		if parseErr != nil {
+			b.sendError(client, req.ID, "invalid after.lt: "+parseErr.Error(), -32602)
+			return
+		}
+		after = &ton.TransactionID3{Account: account, LT: lt}
+	}
+
+	var txList []ton.TransactionShortInfo
+	var incomplete bool
+	if after == nil {
+		txList, incomplete, err = b.api.GetBlockTransactionsV2(ctx, block, params.Count)
+	} else {
+		txList, incomplete, err = b.api.GetBlockTransactionsV2(ctx, block, params.Count, after)
+	}
 	if err != nil {
 		b.sendError(client, req.ID, "get block transactions failed: "+err.Error())
 		return
@@ -843,10 +934,19 @@ func (b *WSBridge) handleGetBlockTransactions(client *wsClient, req *WSRequest) 
 		txResults = []map[string]any{}
 	}
 
-	b.sendResult(client, req.ID, map[string]any{
+	result := map[string]any{
 		"transactions": txResults,
 		"incomplete":   incomplete,
-	})
+		"next_after":   nil,
+	}
+	if incomplete && len(txList) > 0 {
+		last := txList[len(txList)-1]
+		result["next_after"] = map[string]any{
+			"account": hex.EncodeToString(last.Account),
+			"lt":      fmt.Sprintf("%d", last.LT),
+		}
+	}
+	b.sendResult(client, req.ID, result)
 }
 
 func (b *WSBridge) handleGetShards(client *wsClient, req *WSRequest) {
@@ -888,8 +988,11 @@ func (b *WSBridge) handleGetBlockchainConfig(client *wsClient, req *WSRequest) {
 		Params []int32 `json:"params"`
 	}
 	// params is optional — if missing or empty, get all
-	if req.Params != nil {
-		_ = json.Unmarshal(req.Params, &params)
+	if len(req.Params) > 0 && string(req.Params) != "null" {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
@@ -912,7 +1015,7 @@ func (b *WSBridge) handleGetBlockchainConfig(client *wsClient, req *WSRequest) {
 		for _, id := range params.Params {
 			c := cfg.Get(id)
 			if c != nil {
-				boc := c.ToBOCWithFlags(false)
+				boc := c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 				result[fmt.Sprintf("%d", id)] = base64.StdEncoding.EncodeToString(boc)
 			} else {
 				result[fmt.Sprintf("%d", id)] = nil
@@ -920,7 +1023,7 @@ func (b *WSBridge) handleGetBlockchainConfig(client *wsClient, req *WSRequest) {
 		}
 	} else {
 		for id, c := range cfg.All() {
-			boc := c.ToBOCWithFlags(false)
+			boc := c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 			result[fmt.Sprintf("%d", id)] = base64.StdEncoding.EncodeToString(boc)
 		}
 	}
@@ -969,18 +1072,15 @@ func (b *WSBridge) handleGetTransaction(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	// Paginate backward from the latest tx (max 10 pages × 20 = 200 txs)
+	// The request context bounds the history walk.
 	currentLT := acc.LastTxLT
 	currentHash := acc.LastTxHash
 
-	for page := 0; page < 10 && currentLT != 0; page++ {
-		txList, listErr := b.api.ListTransactions(ctx, addr, 20, currentLT, currentHash)
+	for currentLT != 0 {
+		txList, listErr := b.api.ListTransactions(ctx, addr, 100, currentLT, currentHash)
 		if listErr != nil {
-			if page == 0 {
-				b.sendError(client, req.ID, "failed to list transactions: "+listErr.Error())
-				return
-			}
-			break
+			b.sendError(client, req.ID, "failed to list transactions: "+listErr.Error())
+			return
 		}
 		for _, tx := range txList {
 			if tx.LT == lt {
@@ -999,7 +1099,6 @@ func (b *WSBridge) handleGetTransaction(client *wsClient, req *WSRequest) {
 
 	b.sendError(client, req.ID, "transaction not found for lt "+params.LT)
 }
-
 
 func (b *WSBridge) handleFindTxByInMsgHash(client *wsClient, req *WSRequest) {
 	var params struct {
@@ -1022,11 +1121,15 @@ func (b *WSBridge) handleFindTxByInMsgHash(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "invalid msg_hash hex: "+err.Error(), -32602)
 		return
 	}
+	if len(hashBytes) != 32 {
+		b.sendError(client, req.ID, "msg_hash must be 32 bytes", -32602)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
-	tx, err := b.api.FindLastTransactionByInMsgHash(ctx, addr, hashBytes)
+	tx, err := b.api.FindLastTransactionByInMsgHashAfterTime(ctx, addr, hashBytes, time.Time{})
 	if err != nil {
 		b.sendError(client, req.ID, "find tx by in msg hash failed: "+err.Error())
 		return
@@ -1056,11 +1159,15 @@ func (b *WSBridge) handleFindTxByOutMsgHash(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "invalid msg_hash hex: "+err.Error(), -32602)
 		return
 	}
+	if len(hashBytes) != 32 {
+		b.sendError(client, req.ID, "msg_hash must be 32 bytes", -32602)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Lite.Timeout)
 	defer cancel()
 
-	tx, err := b.api.FindLastTransactionByOutMsgHash(ctx, addr, hashBytes)
+	tx, err := b.api.FindLastTransactionByOutMsgHashAfterTime(ctx, addr, hashBytes, time.Time{})
 	if err != nil {
 		b.sendError(client, req.ID, "find tx by out msg hash failed: "+err.Error())
 		return
@@ -1096,25 +1203,13 @@ func (b *WSBridge) handleGetBlockData(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	var resp tl.Serializable
-	if err = b.api.Client().QueryLiteserver(ctx, ton.GetBlockData{ID: block}, &resp); err != nil {
+	cl, err := b.api.GetBlockDataAsCell(ctx, block)
+	if err != nil {
 		b.sendError(client, req.ID, "get block data failed: "+err.Error())
 		return
 	}
 
-	bd, ok := resp.(ton.BlockData)
-	if !ok {
-		b.sendError(client, req.ID, "unexpected response type from liteserver")
-		return
-	}
-
-	cl, err := cell.FromBOC(bd.Payload)
-	if err != nil {
-		b.sendError(client, req.ID, "failed to parse block BOC: "+err.Error())
-		return
-	}
-
-	boc := cl.ToBOCWithFlags(false)
+	boc := cl.ToBOCWithOptions(cell.BOCSerializeOptions{})
 	b.sendResult(client, req.ID, map[string]any{
 		"boc": base64.StdEncoding.EncodeToString(boc),
 	})
@@ -1147,34 +1242,24 @@ func (b *WSBridge) handleGetBlockHeader(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	var resp tl.Serializable
-	if err = b.api.Client().QueryLiteserver(ctx, ton.GetBlockHeader{ID: block, Mode: 0}, &resp); err != nil {
+	header, err := b.api.GetBlockHeader(ctx, block)
+	if err != nil {
 		b.sendError(client, req.ID, "get block header failed: "+err.Error())
 		return
 	}
-
-	bh, ok := resp.(ton.BlockHeader)
-	if !ok {
-		b.sendError(client, req.ID, "unexpected response type from liteserver")
-		return
-	}
-
-	// Parse the header proof to extract block info fields
-	proofCell, err := cell.FromBOC(bh.HeaderProof)
+	headerCell, err := tlb.ToCell(header)
 	if err != nil {
-		b.sendError(client, req.ID, "failed to parse header proof BOC: "+err.Error())
+		b.sendError(client, req.ID, "failed to serialize verified block header: "+err.Error())
 		return
 	}
-
-	proofBOC := base64.StdEncoding.EncodeToString(proofCell.ToBOCWithFlags(false))
 
 	b.sendResult(client, req.ID, map[string]any{
-		"workchain":  bh.ID.Workchain,
-		"shard":      fmt.Sprintf("%016x", uint64(bh.ID.Shard)),
-		"seqno":      bh.ID.SeqNo,
-		"root_hash":  hex.EncodeToString(bh.ID.RootHash),
-		"file_hash":  hex.EncodeToString(bh.ID.FileHash),
-		"header_boc": proofBOC,
+		"workchain":  block.Workchain,
+		"shard":      fmt.Sprintf("%016x", uint64(block.Shard)),
+		"seqno":      block.SeqNo,
+		"root_hash":  hex.EncodeToString(block.RootHash),
+		"file_hash":  hex.EncodeToString(block.FileHash),
+		"header_boc": base64.StdEncoding.EncodeToString(headerCell.ToBOCWithOptions(cell.BOCSerializeOptions{})),
 	})
 }
 
@@ -1205,6 +1290,10 @@ func (b *WSBridge) handleGetLibraries(client *wsClient, req *WSRequest) {
 			b.sendError(client, req.ID, fmt.Sprintf("invalid hash at index %d: %s", i, err.Error()), -32602)
 			return
 		}
+		if len(decoded) != 32 {
+			b.sendError(client, req.ID, fmt.Sprintf("invalid hash at index %d: expected 32 bytes", i), -32602)
+			return
+		}
 		hashBytes[i] = decoded
 	}
 
@@ -1222,7 +1311,7 @@ func (b *WSBridge) handleGetLibraries(client *wsClient, req *WSRequest) {
 		if c == nil {
 			libraries[i] = nil
 		} else {
-			boc := c.ToBOCWithFlags(false)
+			boc := c.ToBOCWithOptions(cell.BOCSerializeOptions{})
 			libraries[i] = map[string]any{
 				"hash": params.Hashes[i],
 				"boc":  base64.StdEncoding.EncodeToString(boc),
@@ -1280,10 +1369,11 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to parse external message: "+err.Error())
 		return
 	}
+	if extMsg.DstAddr == nil || extMsg.Body == nil {
+		b.sendError(client, req.ID, "external message must contain destination and body", -32602)
+		return
+	}
 
-	destAddr := extMsg.DstAddr
-	// Hash the body cell for matching
-	bodyHash := extMsg.Body.Hash()
 	msgHash := msgCell.Hash()
 
 	// Create a context with 180s timeout, cancellable by client disconnect
@@ -1301,112 +1391,105 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 		client.subscriptionsMu.Unlock()
 	}()
 
-	// Send the BOC to the network
-	var resp tl.Serializable
-	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
-	err = b.api.Client().QueryLiteserver(sendCtx, ton.SendMessage{Body: bocBytes}, &resp)
-	sendCancel()
+	block, err := b.api.CurrentMasterchainInfo(ctx)
 	if err != nil {
+		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
+		return
+	}
+	acc, err := b.api.GetAccount(ctx, block, extMsg.DstAddr)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get account state: "+err.Error())
+		return
+	}
+	if err := b.api.SendExternalMessage(ctx, &extMsg); err != nil {
 		b.sendError(client, req.ID, "send message failed: "+err.Error())
 		return
 	}
 
-	// Send immediate confirmation with subscription ID
 	b.sendResult(client, req.ID, map[string]any{
 		"watching":        true,
 		"subscription_id": subID,
 		"msg_hash":        hex.EncodeToString(msgHash),
 	})
 
-	// Get starting block
-	block, err := b.api.CurrentMasterchainInfo(ctx)
+	tx, confirmedAt, err := b.waitForExternalMessage(ctx, &extMsg, block, acc)
 	if err != nil {
 		b.sendEvent(client, "tx_timeout", map[string]any{
 			"msg_hash": hex.EncodeToString(msgHash),
-			"reason":   "failed to get masterchain info",
+			"reason":   err.Error(),
 		})
 		return
 	}
+	b.sendEvent(client, "tx_confirmed", map[string]any{
+		"msg_hash":    hex.EncodeToString(msgHash),
+		"transaction": serializeTransaction(tx),
+		"block": map[string]any{
+			"seqno":     confirmedAt.SeqNo,
+			"workchain": confirmedAt.Workchain,
+			"shard":     fmt.Sprintf("%016x", uint64(confirmedAt.Shard)),
+		},
+	})
+}
 
-	// Get initial account state for comparison
-	acc, err := b.api.GetAccount(ctx, block, destAddr)
-	if err != nil {
-		b.sendEvent(client, "tx_timeout", map[string]any{
-			"msg_hash": hex.EncodeToString(msgHash),
-			"reason":   "failed to get account state",
-		})
-		return
-	}
-	lastLT := acc.LastTxLT
-
-	// Poll blocks until we find the matching transaction
-	for {
-		select {
-		case <-ctx.Done():
-			b.sendEvent(client, "tx_timeout", map[string]any{
-				"msg_hash": hex.EncodeToString(msgHash),
-				"reason":   "timeout",
-			})
-			return
-		default:
-		}
-
+func (b *WSBridge) waitForExternalMessage(ctx context.Context, ext *tlb.ExternalMessage, block *ton.BlockIDExt, acc *tlb.Account) (*tlb.Transaction, *ton.BlockIDExt, error) {
+nextBlock:
+	for ctx.Err() == nil {
 		newBlock, err := b.api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(ctx)
 		if err != nil {
-			if ctx.Err() != nil {
-				b.sendEvent(client, "tx_timeout", map[string]any{
-					"msg_hash": hex.EncodeToString(msgHash),
-					"reason":   "timeout",
-				})
-				return
-			}
-			time.Sleep(time.Second)
+			continue
+		}
+		newAcc, err := b.api.WaitForBlock(newBlock.SeqNo).GetAccount(ctx, newBlock, ext.DstAddr)
+		if err != nil {
 			continue
 		}
 		block = newBlock
 
-		// Check if account's LastTxLT changed
-		newAcc, err := b.api.GetAccount(ctx, block, destAddr)
-		if err != nil {
+		if newAcc.LastTxLT == acc.LastTxLT {
+			if err := b.api.SendExternalMessage(ctx, ext); err != nil {
+				continue
+			}
 			continue
 		}
 
-		if newAcc.LastTxLT == lastLT {
-			continue // no new transactions
-		}
-
-		// New transactions! Scan them for our message
-		txList, err := b.api.ListTransactions(ctx, destAddr, 10, newAcc.LastTxLT, newAcc.LastTxHash)
-		if err != nil {
-			lastLT = newAcc.LastTxLT
-			continue
-		}
-
-		for _, tx := range txList {
-			if tx.IO.In == nil {
-				continue
+		lastLT, lastHash := newAcc.LastTxLT, newAcc.LastTxHash
+		for ctx.Err() == nil && lastLT != 0 {
+			txList, err := b.api.WaitForBlock(block.SeqNo).ListTransactions(ctx, ext.DstAddr, 20, lastLT, lastHash)
+			if err != nil {
+				continue nextBlock
 			}
-			// Check if this is an external in message with matching body hash
-			inMsg := tx.IO.In.Msg
-			if inMsg.Payload() == nil {
-				continue
+
+			sawPrevious := false
+			for i, tx := range txList {
+				if i == 0 {
+					lastLT, lastHash = tx.PrevTxLT, tx.PrevTxHash
+				}
+				if tx.PrevTxLT == acc.LastTxLT && bytes.Equal(tx.PrevTxHash, acc.LastTxHash) {
+					sawPrevious = true
+				}
+				if tx.IO.In == nil || tx.IO.In.MsgType != tlb.MsgTypeExternalIn {
+					continue
+				}
+				in := tx.IO.In.AsExternalIn()
+				if ext.StateInit != nil {
+					if in.StateInit == nil || ext.StateInit.Code == nil || ext.StateInit.Data == nil || in.StateInit.Code == nil || in.StateInit.Data == nil {
+						continue
+					}
+					if ext.StateInit.Code.HashKey() != in.StateInit.Code.HashKey() || ext.StateInit.Data.HashKey() != in.StateInit.Data.HashKey() {
+						continue
+					}
+				}
+				if in.Body != nil && ext.Body != nil && in.Body.HashKey() == ext.Body.HashKey() {
+					return tx, block, nil
+				}
 			}
-			if bytes.Equal(inMsg.Payload().Hash(), bodyHash) {
-				// Found it!
-				b.sendEvent(client, "tx_confirmed", map[string]any{
-					"msg_hash":    hex.EncodeToString(msgHash),
-					"transaction": serializeTransaction(tx),
-					"block": map[string]any{
-						"seqno":     block.SeqNo,
-						"workchain": block.Workchain,
-						"shard":     fmt.Sprintf("%016x", uint64(block.Shard)),
-					},
-				})
-				return
+			if sawPrevious || len(txList) == 0 {
+				break
 			}
 		}
-
-		lastLT = newAcc.LastTxLT
+		acc = newAcc
 	}
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	return nil, nil, fmt.Errorf("transaction was not confirmed")
 }
-

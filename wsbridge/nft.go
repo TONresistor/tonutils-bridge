@@ -41,7 +41,7 @@ func (b *WSBridge) handleNFTGetData(client *wsClient, req *WSRequest) {
 	// If the NFT belongs to a collection, resolve full content via the collection
 	// contract (combines base URL + individual content per TEP-62).
 	content := data.Content
-	if data.CollectionAddress != nil && data.Index != nil {
+	if data.CollectionAddress != nil && !data.CollectionAddress.IsAddrNone() && data.Index != nil {
 		collClient := nft.NewCollectionClient(b.api, data.CollectionAddress)
 		individualContent := data.Content
 		if individualContent == nil {
@@ -60,12 +60,8 @@ func (b *WSBridge) handleNFTGetData(client *wsClient, req *WSRequest) {
 		"content":     serializeContent(content),
 	}
 
-	if data.CollectionAddress != nil {
-		result["collection"] = data.CollectionAddress.String()
-	}
-	if data.OwnerAddress != nil {
-		result["owner"] = data.OwnerAddress.String()
-	}
+	result["collection"] = addressStringOrNil(data.CollectionAddress)
+	result["owner"] = addressStringOrNil(data.OwnerAddress)
 
 	b.sendResult(client, req.ID, result)
 }
@@ -105,9 +101,7 @@ func (b *WSBridge) handleNFTGetCollectionData(client *wsClient, req *WSRequest) 
 		"content":         serializeContent(data.Content),
 	}
 
-	if data.OwnerAddress != nil {
-		result["owner"] = data.OwnerAddress.String()
-	}
+	result["owner"] = addressStringOrNil(data.OwnerAddress)
 
 	b.sendResult(client, req.ID, result)
 }
@@ -179,9 +173,7 @@ func (b *WSBridge) handleNFTGetRoyaltyParams(client *wsClient, req *WSRequest) {
 		"base":    royalty.Base,
 		"address": nil,
 	}
-	if royalty.Address != nil {
-		result["address"] = royalty.Address.String()
-	}
+	result["address"] = addressStringOrNil(royalty.Address)
 
 	b.sendResult(client, req.ID, result)
 }

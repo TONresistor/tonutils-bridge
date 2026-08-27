@@ -11,34 +11,93 @@ import (
 	"strings"
 
 	"github.com/xssnick/tonutils-go/address"
+	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton/nft"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"github.com/xssnick/tonutils-go/tvm/tuple"
 )
 
-// privateNets holds pre-parsed CIDR ranges for private/loopback/link-local IPs.
+// privateNets holds private and special-purpose ranges that must not be used
+// as untrusted ADNL discovery targets.
 var privateNets []*net.IPNet
 
 func init() {
 	for _, cidr := range []string{
+		"0.0.0.0/8",
 		"127.0.0.0/8",
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"169.254.0.0/16",
-		"::1/128",
-		"fe80::/10",
-		"fc00::/7",
-		"0.0.0.0/8",
 		"100.64.0.0/10",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"192.88.99.0/24",
 		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
 		"224.0.0.0/4",
+		"240.0.0.0/4",
+		"::/128",
+		"::1/128",
+		"64:ff9b:1::/48",
+		"100::/64",
+		"100:0:0:1::/64",
+		"2001::/23",
+		"2001:db8::/32",
+		"2002::/16",
+		"3fff::/20",
+		"5f00::/16",
+		"fc00::/7",
+		"fe80::/10",
+		"ff00::/8",
 	} {
 		_, network, _ := net.ParseCIDR(cidr)
 		privateNets = append(privateNets, network)
 	}
 }
 
+func isPublicUnicastIP(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() && !isPrivateIP(ip)
+}
+
+func parseBoxedTL(data []byte) (any, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("TL object is empty")
+	}
+	var obj any
+	rest, err := tl.Parse(&obj, data, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("trailing TL bytes")
+	}
+	return obj, nil
+}
+
+func parseRPCPayload(data []byte, raw bool) (any, error) {
+	if raw {
+		return RawMessage{Data: append([]byte(nil), data...)}, nil
+	}
+	return parseBoxedTL(data)
+}
+
+func serializeRPCPayload(result any, raw bool) ([]byte, error) {
+	if raw {
+		switch value := result.(type) {
+		case RawMessage:
+			return append([]byte(nil), value.Data...), nil
+		case *RawMessage:
+			if value == nil {
+				return nil, nil
+			}
+			return append([]byte(nil), value.Data...), nil
+		}
+	}
+	return tl.Serialize(result, true)
+}
 
 // tunnelOverlayKeyHash computes SHA256(TL-serialize(adnlTunnel.overlayKey{paymentNode}))
 // without relying on the TL registry, avoiding conflicts between wsbridge.OverlayKey
@@ -67,48 +126,79 @@ func parseAddress(raw string) (*address.Address, error) {
 	return address.ParseAddr(raw)
 }
 
-// serializeStack converts a TVM stack tuple into JSON-serializable values.
-func serializeStack(tuple []any) []any {
-	var result []any
-	for _, item := range tuple {
-		switch v := item.(type) {
-		case *big.Int:
-			result = append(result, v.String())
-		case *cell.Cell:
-			boc := v.ToBOCWithFlags(false)
-			result = append(result, base64.StdEncoding.EncodeToString(boc))
-		case *cell.Slice:
-			if v != nil {
-				c, err := v.ToCell()
-				if err != nil {
-					result = append(result, nil)
-				} else {
-					boc := c.ToBOCWithFlags(false)
-					result = append(result, base64.StdEncoding.EncodeToString(boc))
-				}
-			} else {
-				result = append(result, nil)
-			}
-		case nil:
-			result = append(result, nil)
-		default:
-			result = append(result, fmt.Sprintf("%v", v))
-		}
+func addressStringOrNil(addr *address.Address) any {
+	if addr == nil || addr.IsAddrNone() {
+		return nil
 	}
-	if result == nil {
-		result = []any{}
+	return addr.String()
+}
+
+// serializeStack converts a TVM stack tuple into JSON-serializable values.
+func serializeStack(values []any) []any {
+	result := make([]any, 0, len(values))
+	for _, item := range values {
+		result = append(result, serializeStackValue(item))
 	}
 	return result
+}
+
+func serializeStackValue(item any) any {
+	switch v := item.(type) {
+	case *big.Int:
+		if v == nil {
+			return nil
+		}
+		return v.String()
+	case *cell.Cell:
+		if v == nil {
+			return nil
+		}
+		return base64.StdEncoding.EncodeToString(v.ToBOCWithOptions(cell.BOCSerializeOptions{}))
+	case *cell.Slice:
+		if v == nil {
+			return nil
+		}
+		c, err := v.ToCell()
+		if err != nil {
+			return nil
+		}
+		return base64.StdEncoding.EncodeToString(c.ToBOCWithOptions(cell.BOCSerializeOptions{}))
+	case []any:
+		return serializeStack(v)
+	case tuple.Tuple:
+		return serializeTuple(&v)
+	case *tuple.Tuple:
+		return serializeTuple(v)
+	case nil:
+		return nil
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func serializeTuple(value *tuple.Tuple) any {
+	if value == nil || value.IsNull() {
+		return nil
+	}
+	items := make([]any, 0, value.Len())
+	for i := 0; i < value.Len(); i++ {
+		item, err := value.Index(i)
+		if err != nil {
+			return nil
+		}
+		items = append(items, serializeStackValue(item))
+	}
+	return items
 }
 
 // serializeTransaction converts a TLB Transaction into a JSON-serializable map.
 func serializeTransaction(tx *tlb.Transaction) map[string]any {
 	txMap := map[string]any{
-		"hash":        hex.EncodeToString(tx.Hash),
-		"lt":          fmt.Sprintf("%d", tx.LT),
-		"now":         tx.Now,
-		"total_fees":  tx.TotalFees.Coins.Nano().String(),
-		"prev_tx_lt":  fmt.Sprintf("%d", tx.PrevTxLT),
+		"hash":         hex.EncodeToString(tx.Hash),
+		"lt":           fmt.Sprintf("%d", tx.LT),
+		"now":          tx.Now,
+		"total_fees":   tx.TotalFees.Coins.Nano().String(),
+		"prev_tx_lt":   fmt.Sprintf("%d", tx.PrevTxLT),
 		"prev_tx_hash": hex.EncodeToString(tx.PrevTxHash),
 	}
 
@@ -192,6 +282,9 @@ func serializeJettonContent(content nft.ContentAny) map[string]any {
 // serializeMessage converts a TLB Message into a JSON-serializable map.
 func serializeMessage(msg *tlb.Message) map[string]any {
 	m := map[string]any{}
+	if msgCell, err := tlb.ToCell(msg.Msg); err == nil {
+		m["hash"] = hex.EncodeToString(msgCell.Hash())
+	}
 
 	if msg.Msg.SenderAddr() != nil {
 		m["source"] = msg.Msg.SenderAddr().String()
@@ -214,7 +307,7 @@ func serializeMessage(msg *tlb.Message) map[string]any {
 
 	// Serialize body as base64 BOC
 	if payload := msg.Msg.Payload(); payload != nil {
-		boc := payload.ToBOCWithFlags(false)
+		boc := payload.ToBOCWithOptions(cell.BOCSerializeOptions{})
 		m["body"] = base64.StdEncoding.EncodeToString(boc)
 	} else {
 		m["body"] = ""

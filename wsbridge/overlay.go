@@ -18,6 +18,9 @@ import (
 // maxOverlayBroadcastSize bounds the payload accepted by overlay.broadcast to
 // protect the node from oversized fan-out requests coming over the local API.
 const maxOverlayBroadcastSize = 1 << 20 // 1 MiB
+const maxOverlayBroadcastWireSize = maxOverlayBroadcastSize + 4096
+const maxOverlayQuerySize = 8*1024 - 128
+const maxConcurrentOverlayBroadcasts = 4
 
 // clientOwnsOverlay checks if the given overlay hex ID belongs to this client.
 func clientOwnsOverlay(client *wsClient, overlayHex string) bool {
@@ -31,6 +34,21 @@ func clientOwnsOverlay(client *wsClient, overlayHex string) bool {
 	return false
 }
 
+func closeOverlay(overlayWrapper *overlay.ADNLOverlayWrapper) {
+	if overlayWrapper == nil {
+		return
+	}
+	overlayWrapper.Close()
+	overlayWrapper.BroadcastReceiver.Close()
+}
+
+func bridgeBroadcastDisposition(info overlay.BroadcastInfo) overlay.BroadcastDisposition {
+	if info.Trusted {
+		return overlay.BroadcastDispositionAcceptAndRelay
+	}
+	return overlay.BroadcastDispositionIgnore
+}
+
 func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	var params struct {
 		OverlayID string `json:"overlay_id"` // base64
@@ -38,15 +56,6 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
-		return
-	}
-
-	// B5: Limit overlays per client
-	client.peersMu.Lock()
-	overlayCount := len(client.overlays)
-	client.peersMu.Unlock()
-	if overlayCount >= b.cfg.Namespaces.Overlay.MaxOverlays {
-		b.sendError(client, req.ID, fmt.Sprintf("max overlays limit reached (%d)", b.cfg.Namespaces.Overlay.MaxOverlays), -32602)
 		return
 	}
 
@@ -62,12 +71,29 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 		return
 	}
 
+	b.peerLifecycleMu.Lock()
+	client.peersMu.Lock()
+	overlayCount := len(client.overlays)
+	client.peersMu.Unlock()
+	if overlayCount >= b.cfg.Namespaces.Overlay.MaxOverlays {
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, fmt.Sprintf("max overlays limit reached (%d)", b.cfg.Namespaces.Overlay.MaxOverlays), -32602)
+		return
+	}
+
 	peerHex := hex.EncodeToString(peerIDBytes)
 	b.activePeersMu.RLock()
-	peer, ok := b.activePeers[peerHex]
+	_, ok := b.activePeers[peerHex]
+	manager := b.peerWrappers[peerHex]
 	b.activePeersMu.RUnlock()
-	if !ok {
+	if !ok || manager == nil {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "peer not found — connect first via adnl.connect", -32602)
+		return
+	}
+	if !clientOwnsPeer(client, peerHex) {
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, "peer not owned by this client", -32602)
 		return
 	}
 
@@ -77,6 +103,20 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	b.activeOverlaysMu.Lock()
 	if _, exists := b.activeOverlays[overlayHex]; exists {
 		b.activeOverlaysMu.Unlock()
+		if !clientOwnsOverlay(client, overlayHex) {
+			b.peerLifecycleMu.Unlock()
+			b.sendError(client, req.ID, "overlay is already joined by another client", -32602)
+			return
+		}
+		b.overlayToPeerMu.Lock()
+		existingPeerHex := b.overlayToPeer[overlayHex]
+		b.overlayToPeerMu.Unlock()
+		if existingPeerHex != peerHex {
+			b.peerLifecycleMu.Unlock()
+			b.sendError(client, req.ID, "overlay is already attached to another peer", -32602)
+			return
+		}
+		b.peerLifecycleMu.Unlock()
 		b.sendResult(client, req.ID, map[string]interface{}{
 			"joined":     true,
 			"overlay_id": params.OverlayID,
@@ -84,9 +124,21 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	// Wrap the peer with overlay support and create the overlay scope
-	adnlWrapper := overlay.CreateExtendedADNL(peer)
-	overlayWrapper := adnlWrapper.WithOverlay(overlayID)
+	receiver, err := overlay.NewBroadcastReceiver(overlayID, maxOverlayBroadcastWireSize, true, false)
+	if err != nil {
+		b.activeOverlaysMu.Unlock()
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, "failed to create overlay receiver: "+err.Error(), -32602)
+		return
+	}
+	overlayWrapper, err := manager.AttachOverlay(receiver)
+	if err != nil {
+		receiver.Close()
+		b.activeOverlaysMu.Unlock()
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, "failed to attach overlay: "+err.Error())
+		return
+	}
 
 	b.activeOverlays[overlayHex] = overlayWrapper
 	b.activeOverlaysMu.Unlock()
@@ -97,21 +149,23 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	b.overlayToPeerMu.Unlock()
 
 	// Set broadcast handler — pushes events to the owning client
-	overlayWrapper.SetBroadcastHandler(func(msg tl.Serializable, trusted bool) error {
+	overlayWrapper.SetBroadcastHandlerWithInfo(func(msg tl.Serializable, info overlay.BroadcastInfo) overlay.BroadcastDisposition {
 		var msgBytes []byte
 		serialized, err := tl.Serialize(msg, true)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to serialize overlay broadcast")
-			return nil
+			return overlay.BroadcastDispositionIgnore
 		}
 		msgBytes = serialized
 
-		b.sendEvent(client, "overlay.broadcast", map[string]interface{}{
+		if !b.sendEvent(client, "overlay.broadcast", map[string]interface{}{
 			"overlay_id": params.OverlayID,
 			"message":    base64.StdEncoding.EncodeToString(msgBytes),
-			"trusted":    trusted,
-		})
-		return nil
+			"trusted":    info.Trusted,
+		}) {
+			return overlay.BroadcastDispositionIgnore
+		}
+		return bridgeBroadcastDisposition(info)
 	})
 
 	overlayWrapper.SetCustomMessageHandler(func(msg *adnl.MessageCustom) error {
@@ -138,6 +192,7 @@ func (b *WSBridge) handleOverlayJoin(client *wsClient, req *WSRequest) {
 	client.peersMu.Lock()
 	client.overlays = append(client.overlays, overlayHex)
 	client.peersMu.Unlock()
+	b.peerLifecycleMu.Unlock()
 
 	b.sendResult(client, req.ID, map[string]interface{}{
 		"joined":     true,
@@ -162,6 +217,13 @@ func (b *WSBridge) handleOverlayLeave(client *wsClient, req *WSRequest) {
 
 	overlayHex := hex.EncodeToString(overlayID)
 
+	b.peerLifecycleMu.Lock()
+	if !clientOwnsOverlay(client, overlayHex) {
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
+		return
+	}
+
 	b.activeOverlaysMu.Lock()
 	ow, ok := b.activeOverlays[overlayHex]
 	if ok {
@@ -170,12 +232,8 @@ func (b *WSBridge) handleOverlayLeave(client *wsClient, req *WSRequest) {
 	b.activeOverlaysMu.Unlock()
 
 	if !ok {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "overlay not found", -32602)
-		return
-	}
-
-	if !clientOwnsOverlay(client, overlayHex) {
-		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
 		return
 	}
 
@@ -194,7 +252,8 @@ func (b *WSBridge) handleOverlayLeave(client *wsClient, req *WSRequest) {
 	delete(b.overlayToPeer, overlayHex)
 	b.overlayToPeerMu.Unlock()
 
-	ow.Close()
+	closeOverlay(ow)
+	b.peerLifecycleMu.Unlock()
 
 	b.sendResult(client, req.ID, map[string]interface{}{
 		"left": true,
@@ -242,6 +301,7 @@ func (b *WSBridge) handleOverlayGetPeers(client *wsClient, req *WSRequest) {
 
 	type peerInfo struct {
 		ID      string `json:"id"`
+		ADNLID  string `json:"adnl_id"`
 		Overlay string `json:"overlay"`
 	}
 
@@ -251,8 +311,13 @@ func (b *WSBridge) handleOverlayGetPeers(client *wsClient, req *WSRequest) {
 		if !ok {
 			continue
 		}
+		adnlID, err := tl.Hash(node.ID)
+		if err != nil {
+			continue
+		}
 		peers = append(peers, peerInfo{
 			ID:      base64.StdEncoding.EncodeToString(id.Key),
+			ADNLID:  base64.StdEncoding.EncodeToString(adnlID),
 			Overlay: base64.StdEncoding.EncodeToString(node.Overlay),
 		})
 	}
@@ -358,9 +423,9 @@ func (b *WSBridge) handleOverlaySendRaw(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	var obj any
-	if _, err := tl.Parse(&obj, data, true); err != nil {
-		b.sendError(client, req.ID, "invalid tonnet broadcast payload: "+err.Error(), -32602)
+	obj, err := parseBoxedTL(data)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid boxed TL payload: "+err.Error(), -32602)
 		return
 	}
 
@@ -431,6 +496,12 @@ func (b *WSBridge) handleOverlayBroadcast(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
 		return
 	}
+	select {
+	case client.broadcastSem <- struct{}{}:
+	default:
+		b.sendError(client, req.ID, fmt.Sprintf("too many active overlay broadcasts (max %d)", maxConcurrentOverlayBroadcasts), -32603)
+		return
+	}
 
 	// Wrap in ws.rawMessage so receivers (which tl.Parse the reassembled payload)
 	// decode it symmetrically with the overlay.sendMessage / overlay.message path.
@@ -441,12 +512,14 @@ func (b *WSBridge) handleOverlayBroadcast(client *wsClient, req *WSRequest) {
 		overlay.BroadcastFlagAnySender,
 	)
 	if err != nil {
+		<-client.broadcastSem
 		b.sendError(client, req.ID, "broadcast init failed: "+err.Error())
 		return
 	}
 
 	broadcaster, err := overlay.NewBroadcastFECBroadcaster(sender, overlay.StaticBroadcastPeerSet{ow})
 	if err != nil {
+		<-client.broadcastSem
 		b.sendError(client, req.ID, "broadcaster init failed: "+err.Error())
 		return
 	}
@@ -455,7 +528,10 @@ func (b *WSBridge) handleOverlayBroadcast(client *wsClient, req *WSRequest) {
 	// TTL (~60s) elapses; it is blocking, so drive it in the background on the
 	// connection-scoped context and return the broadcast id immediately.
 	go func() {
-		if err := broadcaster.Run(client.ctx); err != nil && client.ctx.Err() == nil {
+		defer func() { <-client.broadcastSem }()
+		broadcastCtx, cancel := context.WithTimeout(client.ctx, 65*time.Second)
+		defer cancel()
+		if err := broadcaster.Run(broadcastCtx); err != nil && broadcastCtx.Err() == nil {
 			log.Warn().Err(err).Str("overlay", overlayHex).Msg("overlay broadcast run ended with error")
 		}
 	}()
@@ -470,6 +546,7 @@ func (b *WSBridge) handleOverlayQuery(client *wsClient, req *WSRequest) {
 		OverlayID string `json:"overlay_id"` // base64
 		Data      string `json:"data"`       // base64 TL request
 		Timeout   int    `json:"timeout"`    // optional seconds (default 15)
+		Raw       bool   `json:"raw"`        // preserve legacy ws.rawMessage transport
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
@@ -487,20 +564,33 @@ func (b *WSBridge) handleOverlayQuery(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "invalid base64 data: "+err.Error(), -32602)
 		return
 	}
+	if len(data) == 0 || len(data) > maxOverlayQuerySize {
+		b.sendError(client, req.ID, fmt.Sprintf("query data must be between 1 and %d bytes", maxOverlayQuerySize), -32602)
+		return
+	}
+	query, err := parseRPCPayload(data, params.Raw)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid query payload: "+err.Error(), -32602)
+		return
+	}
 
 	overlayHex := hex.EncodeToString(overlayID)
+	b.peerLifecycleMu.Lock()
 	b.activeOverlaysMu.RLock()
 	ow, ok := b.activeOverlays[overlayHex]
 	b.activeOverlaysMu.RUnlock()
 	if !ok {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "overlay not found — join first via overlay.join", -32602)
 		return
 	}
 
 	if !clientOwnsOverlay(client, overlayHex) {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
 		return
 	}
+	b.peerLifecycleMu.Unlock()
 
 	if params.Timeout <= 0 {
 		params.Timeout = int(b.cfg.Namespaces.Overlay.Timeout.Seconds())
@@ -513,7 +603,7 @@ func (b *WSBridge) handleOverlayQuery(client *wsClient, req *WSRequest) {
 	defer cancel()
 
 	var result any
-	if err := ow.Query(ctx, RawMessage{Data: data}, &result); err != nil {
+	if err := ow.Query(ctx, query, &result); err != nil {
 		b.sendError(client, req.ID, "query failed: "+err.Error())
 		return
 	}
@@ -525,11 +615,9 @@ func (b *WSBridge) handleOverlayQuery(client *wsClient, req *WSRequest) {
 		return
 	}
 
-	resultBytes, err := tl.Serialize(result, true)
+	resultBytes, err := serializeRPCPayload(result, params.Raw)
 	if err != nil {
-		b.sendResult(client, req.ID, map[string]interface{}{
-			"data": base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%v", result))),
-		})
+		b.sendError(client, req.ID, "query returned a non-serializable TL response: "+err.Error())
 		return
 	}
 
@@ -561,15 +649,18 @@ func (b *WSBridge) handleOverlaySetQueryHandler(client *wsClient, req *WSRequest
 	}
 
 	overlayHex := hex.EncodeToString(overlayID)
+	b.peerLifecycleMu.Lock()
 	b.activeOverlaysMu.RLock()
 	ow, ok := b.activeOverlays[overlayHex]
 	b.activeOverlaysMu.RUnlock()
 	if !ok {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "overlay not found — join first via overlay.join", -32602)
 		return
 	}
 
 	if !clientOwnsOverlay(client, overlayHex) {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "overlay not owned by this client", -32602)
 		return
 	}
@@ -579,7 +670,21 @@ func (b *WSBridge) handleOverlaySetQueryHandler(client *wsClient, req *WSRequest
 	peer, ok := b.activePeers[peerHex]
 	b.activePeersMu.RUnlock()
 	if !ok {
+		b.peerLifecycleMu.Unlock()
 		b.sendError(client, req.ID, "peer not found — connect first via adnl.connect", -32602)
+		return
+	}
+	if !clientOwnsPeer(client, peerHex) {
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, "peer not owned by this client", -32602)
+		return
+	}
+	b.overlayToPeerMu.Lock()
+	overlayPeerHex := b.overlayToPeer[overlayHex]
+	b.overlayToPeerMu.Unlock()
+	if overlayPeerHex != peerHex {
+		b.peerLifecycleMu.Unlock()
+		b.sendError(client, req.ID, "overlay is not attached to the requested peer", -32602)
 		return
 	}
 
@@ -587,9 +692,11 @@ func (b *WSBridge) handleOverlaySetQueryHandler(client *wsClient, req *WSRequest
 		queryID := hex.EncodeToString(msg.ID)
 
 		var msgData []byte
+		raw := false
 		switch v := msg.Data.(type) {
 		case RawMessage:
 			msgData = v.Data
+			raw = true
 		default:
 			serialized, err := tl.Serialize(v, true)
 			if err != nil {
@@ -598,17 +705,28 @@ func (b *WSBridge) handleOverlaySetQueryHandler(client *wsClient, req *WSRequest
 			msgData = serialized
 		}
 
+		b.peerLifecycleMu.Lock()
+		b.activePeersMu.RLock()
+		current := b.activePeers[peerHex]
+		b.activePeersMu.RUnlock()
+		if current != peer {
+			b.peerLifecycleMu.Unlock()
+			return nil
+		}
 		b.pendingQueriesMu.Lock()
-		b.pendingQueries[queryID] = pendingQuery{peer: peer, deadline: time.Now().Add(maxPendingQueryTTL)}
+		b.pendingQueries[queryID] = pendingQuery{peer: peer, owner: client, deadline: time.Now().Add(maxPendingQueryTTL)}
 		b.pendingQueriesMu.Unlock()
+		b.peerLifecycleMu.Unlock()
 
 		b.sendEvent(client, "overlay.queryReceived", map[string]interface{}{
 			"overlay_id": params.OverlayID,
 			"query_id":   queryID,
 			"data":       base64.StdEncoding.EncodeToString(msgData),
+			"raw":        raw,
 		})
 		return nil
 	})
+	b.peerLifecycleMu.Unlock()
 
 	b.sendResult(client, req.ID, map[string]interface{}{
 		"enabled": true,
@@ -619,6 +737,7 @@ func (b *WSBridge) handleOverlayAnswer(client *wsClient, req *WSRequest) {
 	var params struct {
 		QueryID string `json:"query_id"` // hex
 		Data    string `json:"data"`     // base64
+		Raw     bool   `json:"raw"`      // answer a legacy ws.rawMessage query
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
@@ -630,41 +749,65 @@ func (b *WSBridge) handleOverlayAnswer(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "invalid base64 data: "+err.Error(), -32602)
 		return
 	}
-
-	b.pendingQueriesMu.Lock()
-	pq, ok := b.pendingQueries[params.QueryID]
-	if ok {
-		delete(b.pendingQueries, params.QueryID)
-	}
-	b.pendingQueriesMu.Unlock()
-
-	if !ok || time.Now().After(pq.deadline) {
-		b.sendError(client, req.ID, "query not found or expired", -32602)
+	if len(dataBytes) == 0 || len(dataBytes) > maxOverlayQuerySize {
+		b.sendError(client, req.ID, fmt.Sprintf("answer data must be between 1 and %d bytes", maxOverlayQuerySize), -32602)
 		return
 	}
 
-	b.activePeersMu.RLock()
-	_, peerAlive := b.activePeers[hex.EncodeToString(pq.peer.GetID())]
-	b.activePeersMu.RUnlock()
-	if !peerAlive {
-		b.sendError(client, req.ID, "peer disconnected before answer could be sent", -32602)
-		return
-	}
-
-	peer := pq.peer
 	queryIDBytes, err := hex.DecodeString(params.QueryID)
 	if err != nil {
 		b.sendError(client, req.ID, "invalid query_id hex: "+err.Error(), -32602)
 		return
 	}
+	if len(queryIDBytes) != 32 {
+		b.sendError(client, req.ID, "query_id must be 32 bytes", -32602)
+		return
+	}
+	answer, err := parseRPCPayload(dataBytes, params.Raw)
+	if err != nil {
+		b.sendError(client, req.ID, "invalid answer payload: "+err.Error(), -32602)
+		return
+	}
+
+	b.pendingQueriesMu.Lock()
+	pq, ok := b.pendingQueries[params.QueryID]
+	if !ok || time.Now().After(pq.deadline) {
+		if ok {
+			delete(b.pendingQueries, params.QueryID)
+		}
+		b.pendingQueriesMu.Unlock()
+		b.sendError(client, req.ID, "query not found or expired", -32602)
+		return
+	}
+	if pq.owner != nil && pq.owner != client {
+		b.pendingQueriesMu.Unlock()
+		b.sendError(client, req.ID, "query not owned by this client", -32602)
+		return
+	}
+	b.pendingQueriesMu.Unlock()
+
+	b.activePeersMu.RLock()
+	current := b.activePeers[hex.EncodeToString(pq.peer.GetID())]
+	b.activePeersMu.RUnlock()
+	if current != pq.peer {
+		b.sendError(client, req.ID, "peer disconnected before answer could be sent", -32602)
+		return
+	}
+
+	peer := pq.peer
 
 	ctx, cancel := context.WithTimeout(client.ctx, b.cfg.Namespaces.Overlay.Timeout)
 	defer cancel()
 
-	if err := peer.Answer(ctx, queryIDBytes, RawMessage{Data: dataBytes}); err != nil {
+	if err := peer.Answer(ctx, queryIDBytes, answer); err != nil {
 		b.sendError(client, req.ID, "answer failed: "+err.Error())
 		return
 	}
+	b.pendingQueriesMu.Lock()
+	if currentPending, exists := b.pendingQueries[params.QueryID]; exists && currentPending.peer == pq.peer && currentPending.owner == pq.owner && currentPending.deadline.Equal(pq.deadline) {
+		delete(b.pendingQueries, params.QueryID)
+	}
+	b.pendingQueriesMu.Unlock()
 
 	b.sendResult(client, req.ID, map[string]interface{}{
 		"answered": true,

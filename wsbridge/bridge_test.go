@@ -94,6 +94,9 @@ func TestWSBridge_NetworkInfo(t *testing.T) {
 	if clients < 1 {
 		t.Fatalf("expected ws_clients >= 1, got %v", clients)
 	}
+	if result["dht_initialized"] != false || result["dht_connected"] != false || result["dht_active_nodes"] != float64(0) {
+		t.Fatalf("unexpected nil-DHT status: %#v", result)
+	}
 }
 
 func TestWSBridge_UnknownMethod(t *testing.T) {

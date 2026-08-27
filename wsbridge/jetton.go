@@ -45,9 +45,7 @@ func (b *WSBridge) handleJettonGetData(client *wsClient, req *WSRequest) {
 		"content":      serializeJettonContent(data.Content),
 	}
 
-	if data.AdminAddr != nil {
-		result["admin"] = data.AdminAddr.String()
-	}
+	result["admin"] = addressStringOrNil(data.AdminAddr)
 
 	b.sendResult(client, req.ID, result)
 }
@@ -136,16 +134,16 @@ func (b *WSBridge) handleJettonGetBalance(client *wsClient, req *WSRequest) {
 	if len(stack) >= 2 {
 		if sl, ok := stack[1].(*cell.Slice); ok && sl != nil {
 			ownerAddr, err := sl.LoadAddr()
-			if err == nil && ownerAddr != nil {
-				result["owner"] = ownerAddr.String()
+			if err == nil {
+				result["owner"] = addressStringOrNil(ownerAddr)
 			}
 		}
 	}
 	if len(stack) >= 3 {
 		if sl, ok := stack[2].(*cell.Slice); ok && sl != nil {
 			masterAddr, err := sl.LoadAddr()
-			if err == nil && masterAddr != nil {
-				result["jetton_master"] = masterAddr.String()
+			if err == nil {
+				result["jetton_master"] = addressStringOrNil(masterAddr)
 			}
 		}
 	}
