@@ -69,6 +69,17 @@ func TestParseBoxedTLRejectsTrailingBytes(t *testing.T) {
 	}
 }
 
+func TestParseTonnetSessionChallenge(t *testing.T) {
+	raw := []byte{0x29, 0x3e, 0x72, 0xb3}
+	obj, err := parseBoxedTL(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := obj.(TonnetGetSessionChallenge); !ok {
+		t.Fatalf("parsed %T, want TonnetGetSessionChallenge", obj)
+	}
+}
+
 func TestRawRPCPayloadRoundTrip(t *testing.T) {
 	want := []byte{1, 2, 3}
 	payload, err := parseRPCPayload(want, true)
