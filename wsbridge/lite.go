@@ -28,7 +28,6 @@ func (b *WSBridge) handleGetMasterchainInfo(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
 		return
 	}
-
 	b.sendResult(client, req.ID, map[string]any{
 		"seqno":     block.SeqNo,
 		"workchain": block.Workchain,
@@ -111,9 +110,9 @@ func (b *WSBridge) handleGetAccountState(client *wsClient, req *WSRequest) {
 
 func (b *WSBridge) handleRunMethod(client *wsClient, req *WSRequest) {
 	var params struct {
-		Address string        `json:"address"`
-		Method  string        `json:"method"`
-		Params  []any `json:"params"`
+		Address string `json:"address"`
+		Method  string `json:"method"`
+		Params  []any  `json:"params"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
@@ -265,6 +264,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
 		return
 	}
+	networkNow, err := b.api.GetTime(ctx)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get network time: "+err.Error())
+		return
+	}
 
 	acc, err := b.api.GetAccount(ctx, block, addr)
 	if err != nil {
@@ -281,6 +285,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
 		return
 	}
+	preparedCfg, err := tvm.PrepareBlockchainConfig(bcCfg.Root)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare blockchain config: "+err.Error())
+		return
+	}
 
 	balance := big.NewInt(0)
 	if acc.State != nil && acc.State.IsValid {
@@ -288,11 +297,11 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 	}
 
 	emCfg := tvm.MessageEmulationConfig{
-		Address:    addr,
-		Now:        uint32(time.Now().Unix()),
-		Balance:    balance,
-		ConfigRoot: bcCfg.Root,
-		RandSeed:   make([]byte, 32),
+		Address:  addr,
+		Now:      networkNow,
+		Balance:  balance,
+		Config:   preparedCfg,
+		RandSeed: make([]byte, 32),
 	}
 
 	machine := tvm.NewTVM()
@@ -329,10 +338,10 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 		"out_messages": []any{},
 	}
 	if res.Committed && res.Data != nil {
-		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithFlags(false))
+		result["new_data"] = base64.StdEncoding.EncodeToString(res.Data.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 	}
 	if res.Actions != nil {
-		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithFlags(false))
+		result["actions"] = base64.StdEncoding.EncodeToString(res.Actions.ToBOCWithOptions(cell.BOCSerializeOptions{}))
 		result["out_messages"] = parseOutActions(res.Actions)
 	}
 
@@ -342,18 +351,41 @@ func (b *WSBridge) handleEmulateMessage(client *wsClient, req *WSRequest) {
 // handleEmulateTransaction runs a FULL transaction locally against the target
 // account's real on-chain state using the native Go TVM, without broadcasting.
 // Unlike lite.emulateMessage (compute-phase only), it executes every phase
-// (storage, credit, compute, action) and reports the real fee breakdown and
-// total fees — the preflight a wallet needs before lite.sendMessage.
+// (storage, credit, compute, action) and reports the emulated fee breakdown and
+// total fees — a preflight before lite.sendMessage.
 //
 // `boc` must be a FULL message cell (an external-in message, as passed to
-// lite.sendMessage; or a full internal message). The account must be initialized.
+// lite.sendMessage; or a full internal message). The account must exist, but it
+// may still be uninitialized when the message carries its StateInit.
 // The TVM emulator is alpha upstream; results may differ in edge cases.
-func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
-	var params struct {
-		Address string `json:"address"`
-		BOC     string `json:"boc"`
+type emulateTransactionParams struct {
+	Address      string `json:"address"`
+	BOC          string `json:"boc"`
+	IgnoreChkSig bool   `json:"ignore_chksig"`
+}
+
+func parseEmulateTransactionParams(raw json.RawMessage) (emulateTransactionParams, error) {
+	var params emulateTransactionParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return emulateTransactionParams{}, err
 	}
-	if err := json.Unmarshal(req.Params, &params); err != nil {
+	return params, nil
+}
+
+func (p emulateTransactionParams) transactionOptions() tvm.TransactionOptions {
+	return tvm.TransactionOptions{SignatureCheckAlwaysSucceed: p.IgnoreChkSig}
+}
+
+func accountStateForTransactionEmulation(acc *tlb.Account) (*tlb.AccountState, error) {
+	if acc == nil || acc.State == nil || !acc.State.IsValid {
+		return nil, fmt.Errorf("account does not exist, cannot emulate")
+	}
+	return acc.State, nil
+}
+
+func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
+	params, err := parseEmulateTransactionParams(req.Params)
+	if err != nil {
 		b.sendError(client, req.ID, "invalid params: "+err.Error(), -32602)
 		return
 	}
@@ -383,35 +415,31 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get masterchain info: "+err.Error())
 		return
 	}
+	networkNow, err := b.api.GetTime(ctx)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to get network time: "+err.Error())
+		return
+	}
 
 	acc, err := b.api.GetAccount(ctx, block, addr)
 	if err != nil {
 		b.sendError(client, req.ID, "failed to get account: "+err.Error())
 		return
 	}
-	if acc.Code == nil || acc.Data == nil {
-		b.sendError(client, req.ID, "account is not initialized, cannot emulate", -32602)
+	accountState, err := accountStateForTransactionEmulation(acc)
+	if err != nil {
+		b.sendError(client, req.ID, err.Error(), -32602)
 		return
 	}
 
-	// EmulateTransaction needs the raw account cell to build the ShardAccount
-	// input; GetAccount only returns the parsed form, so fetch the cell directly.
-	var accResp tl.Serializable
-	if err = b.api.Client().QueryLiteserver(ctx, ton.GetAccountState{
-		ID:      block,
-		Account: ton.AccountID{Workchain: addr.Workchain(), ID: addr.Data()},
-	}, &accResp); err != nil {
-		b.sendError(client, req.ID, "failed to get account state: "+err.Error())
-		return
-	}
-	accState, ok := accResp.(ton.AccountState)
-	if !ok || accState.State == nil {
-		b.sendError(client, req.ID, "account state unavailable for emulation")
+	accountCell, err := accountState.ToCell()
+	if err != nil {
+		b.sendError(client, req.ID, "failed to serialize verified account state: "+err.Error())
 		return
 	}
 
 	shard := &tlb.ShardAccount{
-		Account:       accState.State,
+		Account:       accountCell,
 		LastTransHash: acc.LastTxHash,
 		LastTransLT:   acc.LastTxLT,
 	}
@@ -421,19 +449,31 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "failed to get blockchain config: "+err.Error())
 		return
 	}
-
-	balance := big.NewInt(0)
-	if acc.State != nil && acc.State.IsValid {
-		balance = acc.State.Balance.Nano()
+	preparedCfg, err := tvm.PrepareBlockchainConfig(bcCfg.Root)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare blockchain config: "+err.Error())
+		return
+	}
+	blockCtx, err := preparedCfg.NewBlockContext(tvm.BlockOptions{
+		Now:      networkNow,
+		RandSeed: make([]byte, 32),
+	})
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare block context: "+err.Error())
+		return
+	}
+	preparedAccount, err := tvm.PrepareAccount(shard, addr)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare account: "+err.Error())
+		return
+	}
+	preparedMessage, err := tvm.PrepareMessage(msgCell)
+	if err != nil {
+		b.sendError(client, req.ID, "failed to prepare message: "+err.Error(), -32602)
+		return
 	}
 
-	res, err := tvm.NewTVM().EmulateTransaction(shard, msgCell, tvm.TransactionEmulationConfig{
-		Address:    addr,
-		Now:        uint32(time.Now().Unix()),
-		Balance:    balance,
-		ConfigRoot: bcCfg.Root,
-		RandSeed:   make([]byte, 32),
-	})
+	res, err := tvm.NewTVM().EmulateTransaction(blockCtx, preparedAccount, preparedMessage, params.transactionOptions())
 	if err != nil {
 		b.sendError(client, req.ID, "emulation failed: "+err.Error())
 		return
@@ -448,10 +488,15 @@ func (b *WSBridge) handleEmulateTransaction(client *wsClient, req *WSRequest) {
 		"gas_used":   res.GasUsed,
 		"total_fees": "0",
 	}
-	if res.Transaction != nil {
-		result["transaction"] = serializeTransaction(res.Transaction)
-		result["total_fees"] = res.Transaction.TotalFees.Coins.Nano().String()
-		summarizeTxPhases(res.Transaction, result)
+	if res.TransactionCell != nil {
+		tx, parseErr := res.ParseTransaction()
+		if parseErr != nil {
+			b.sendError(client, req.ID, "failed to parse emulated transaction: "+parseErr.Error())
+			return
+		}
+		result["transaction"] = serializeTransaction(tx)
+		result["total_fees"] = tx.TotalFees.Coins.Nano().String()
+		summarizeTxPhases(tx, result)
 	}
 
 	b.sendResult(client, req.ID, result)
@@ -1000,7 +1045,6 @@ func (b *WSBridge) handleGetTransaction(client *wsClient, req *WSRequest) {
 	b.sendError(client, req.ID, "transaction not found for lt "+params.LT)
 }
 
-
 func (b *WSBridge) handleFindTxByInMsgHash(client *wsClient, req *WSRequest) {
 	var params struct {
 		Address string `json:"address"`
@@ -1409,4 +1453,3 @@ func (b *WSBridge) handleSendAndWatch(client *wsClient, req *WSRequest) {
 		lastLT = newAcc.LastTxLT
 	}
 }
-

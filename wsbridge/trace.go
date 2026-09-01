@@ -30,8 +30,8 @@ type pendingMsg struct {
 type traceState struct {
 	traceID    string
 	rootAddr   string
-	pending    int32         // atomic: number of unresolved messages
-	timedOut   int32         // atomic: number of timed-out messages
+	pending    int32 // atomic: number of unresolved messages
+	timedOut   int32 // atomic: number of timed-out messages
 	maxDepth   int
 	msgTimeout time.Duration
 }

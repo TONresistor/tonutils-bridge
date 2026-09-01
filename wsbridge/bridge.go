@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,10 +58,10 @@ type WSRequest struct {
 
 // WSResponse is a JSON-RPC 2.0 response to the WebSocket client
 type WSResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      string      `json:"id"`
-	Result  any `json:"result,omitempty"`
-	Error   *RPCError   `json:"error,omitempty"`
+	JSONRPC string    `json:"jsonrpc"`
+	ID      string    `json:"id"`
+	Result  any       `json:"result,omitempty"`
+	Error   *RPCError `json:"error,omitempty"`
 }
 
 // RPCError follows JSON-RPC 2.0 error format
@@ -74,18 +73,18 @@ type RPCError struct {
 // wsClient wraps a WebSocket connection with a write mutex for safe concurrent writes.
 type wsClient struct {
 	conn       *websocket.Conn
-	mu         sync.Mutex       // write mutex — gorilla/websocket does not support concurrent writers
-	peersMu    sync.Mutex       // guards peers and overlays slices
-	ctx        context.Context  // cancelled when handleWS exits; used to stop subscriptions
-	peers      []string         // ADNL peer IDs created by this client (hex-encoded)
-	overlays   []string         // overlay IDs joined by this client (hex-encoded, for cleanup)
-	wg         sync.WaitGroup   // tracks in-flight handleRequest goroutines
-	activeSubs int32            // number of active subscriptions (accessed via sync/atomic)
+	mu         sync.Mutex      // write mutex — gorilla/websocket does not support concurrent writers
+	peersMu    sync.Mutex      // guards peers and overlays slices
+	ctx        context.Context // cancelled when handleWS exits; used to stop subscriptions
+	peers      []string        // ADNL peer IDs created by this client (hex-encoded)
+	overlays   []string        // overlay IDs joined by this client (hex-encoded, for cleanup)
+	wg         sync.WaitGroup  // tracks in-flight handleRequest goroutines
+	activeSubs int32           // number of active subscriptions (accessed via sync/atomic)
 
 	subscriptionsMu sync.Mutex                    // guards subscriptions map
-	subscriptions   map[string]context.CancelFunc  // subscription ID → cancel function
-	subCounter      uint64                         // monotonic counter for subscription IDs
-	inflightSem chan struct{} // limits concurrent in-flight requests
+	subscriptions   map[string]context.CancelFunc // subscription ID → cancel function
+	subCounter      uint64                        // monotonic counter for subscription IDs
+	inflightSem     chan struct{}                 // limits concurrent in-flight requests
 }
 
 // WSBridge exposes ADNL/DHT/Lite/DNS operations via WebSocket
@@ -102,6 +101,14 @@ type WSBridge struct {
 
 	activePeers   map[string]adnl.Peer
 	activePeersMu sync.RWMutex
+	// peerLifecycleMu serializes peer/overlay ownership changes. The gateway
+	// connection callback is the sole exception because tonutils-go invokes it
+	// synchronously from RegisterClient while connect paths already hold this
+	// mutex; installPeer uses activePeersMu for its atomic compare-and-install.
+	peerLifecycleMu sync.Mutex
+	peerWrappers    map[string]*overlay.ADNLWrapper
+	peerOwners      map[string]*wsClient
+	peerQueries     map[string]func(msg *adnl.MessageQuery) error
 
 	activeOverlays   map[string]*overlay.ADNLOverlayWrapper
 	activeOverlaysMu sync.RWMutex
@@ -135,6 +142,9 @@ func NewWSBridge(cfg *BridgeConfig, dhtClient *dht.Client, api ton.APIClientWrap
 		key:            key,
 		clients:        make(map[*wsClient]bool),
 		activePeers:    make(map[string]adnl.Peer),
+		peerWrappers:   make(map[string]*overlay.ADNLWrapper),
+		peerOwners:     make(map[string]*wsClient),
+		peerQueries:    make(map[string]func(msg *adnl.MessageQuery) error),
 		activeOverlays: make(map[string]*overlay.ADNLOverlayWrapper),
 		pendingQueries: make(map[string]pendingQuery),
 		overlayToPeer:  make(map[string]string),
@@ -162,12 +172,9 @@ func NewWSBridge(cfg *BridgeConfig, dhtClient *dht.Client, api ton.APIClientWrap
 	if gate != nil {
 		// Register inbound connection handler on the ADNL gateway
 		gate.SetConnectionHandler(func(peer adnl.Peer) error {
-			bridge.setupPeerHandlers(peer, nil)
-
-			peerHex := hex.EncodeToString(peer.GetID())
-			bridge.activePeersMu.Lock()
-			bridge.activePeers[peerHex] = peer
-			bridge.activePeersMu.Unlock()
+			if err := bridge.installPeer(peer, nil); err != nil {
+				return err
+			}
 
 			bridge.broadcastToClients("adnl.incomingConnection", map[string]any{
 				"peer_id":     base64.StdEncoding.EncodeToString(peer.GetID()),
@@ -277,29 +284,46 @@ func (b *WSBridge) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Clean up overlays joined by this client on disconnect
 	defer func() {
+		b.peerLifecycleMu.Lock()
+		defer b.peerLifecycleMu.Unlock()
 		client.peersMu.Lock()
-		defer client.peersMu.Unlock()
-		for _, overlayHex := range client.overlays {
+		overlayIDs := append([]string(nil), client.overlays...)
+		client.overlays = nil
+		client.peersMu.Unlock()
+		for _, overlayHex := range overlayIDs {
 			b.activeOverlaysMu.Lock()
-			if ow, ok := b.activeOverlays[overlayHex]; ok {
-				ow.Close()
+			ow, ok := b.activeOverlays[overlayHex]
+			if ok {
 				delete(b.activeOverlays, overlayHex)
 			}
 			b.activeOverlaysMu.Unlock()
+			b.overlayToPeerMu.Lock()
+			delete(b.overlayToPeer, overlayHex)
+			b.overlayToPeerMu.Unlock()
+			if ok {
+				ow.Close()
+			}
 		}
 	}()
 
 	// Clean up ADNL peers created by this client on disconnect
 	defer func() {
 		client.peersMu.Lock()
-		defer client.peersMu.Unlock()
-		for _, peerID := range client.peers {
-			b.activePeersMu.Lock()
-			if p, ok := b.activePeers[peerID]; ok {
+		peerIDs := append([]string(nil), client.peers...)
+		client.peers = nil
+		client.peersMu.Unlock()
+		b.peerLifecycleMu.Lock()
+		defer b.peerLifecycleMu.Unlock()
+		for _, peerID := range peerIDs {
+			b.activePeersMu.RLock()
+			p, ok := b.activePeers[peerID]
+			b.activePeersMu.RUnlock()
+			if ok {
+				if _, removed := b.detachPeerLocked(peerID, p); !removed {
+					continue
+				}
 				p.Close()
-				delete(b.activePeers, peerID)
 			}
-			b.activePeersMu.Unlock()
 		}
 	}()
 
@@ -473,6 +497,10 @@ func (b *WSBridge) handleRequest(client *wsClient, req *WSRequest) {
 		b.handleOverlayGetPeers(client, req)
 	case "overlay.sendMessage":
 		b.handleOverlaySendMessage(client, req)
+	case "overlay.sendRaw":
+		b.handleOverlaySendRaw(client, req)
+	case "overlay.broadcast":
+		b.handleOverlayBroadcast(client, req)
 	case "dht.findValue":
 		b.handleDHTFindValue(client, req)
 	case "dht.storeAddress":

@@ -2,6 +2,8 @@ package wsbridge
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/xssnick/tonutils-go/tl"
 )
 
 // testBridge creates a WSBridge with nil deps (only tests WS layer, not TON network).
@@ -39,6 +42,25 @@ func dialTestBridge(t *testing.T, bridge *WSBridge) (*websocket.Conn, func()) {
 		conn.Close()
 		server.Close()
 	}
+}
+
+func bridgeClientForConn(t *testing.T, bridge *WSBridge, conn *websocket.Conn) *wsClient {
+	t.Helper()
+	want := conn.LocalAddr().String()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		bridge.mu.RLock()
+		for client := range bridge.clients {
+			if client.conn.RemoteAddr().String() == want {
+				bridge.mu.RUnlock()
+				return client
+			}
+		}
+		bridge.mu.RUnlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("websocket client %s was not registered", want)
+	return nil
 }
 
 // rpc sends a JSON-RPC request and reads the response.
@@ -212,6 +234,114 @@ func TestWSBridge_ClientRegistration(t *testing.T) {
 	}
 }
 
+func TestWSBridge_RejectsCrossClientPeerAndOverlayMutation(t *testing.T) {
+	bridge := testBridge()
+	ownerConn, ownerCleanup := dialTestBridge(t, bridge)
+	defer ownerCleanup()
+	strangerConn, strangerCleanup := dialTestBridge(t, bridge)
+	defer strangerCleanup()
+	owner := bridgeClientForConn(t, bridge, ownerConn)
+
+	peerID := make([]byte, 32)
+	peerID[0] = 1
+	peerHex := hex.EncodeToString(peerID)
+	peer := newLifecycleTestPeer(peerID, false)
+	if err := bridge.installPeer(peer, owner); err != nil {
+		t.Fatalf("install owned test peer: %v", err)
+	}
+	owner.peersMu.Lock()
+	owner.peers = append(owner.peers, peerHex)
+	owner.peersMu.Unlock()
+	t.Cleanup(func() {
+		bridge.peerLifecycleMu.Lock()
+		bridge.detachPeerLocked(peerHex, peer)
+		bridge.peerLifecycleMu.Unlock()
+		closeLifecycleTestPeer(t, peer)
+	})
+
+	resp := rpc(t, strangerConn, "disconnect", "adnl.disconnect", map[string]string{
+		"peer_id": base64.StdEncoding.EncodeToString(peerID),
+	})
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "not owned") {
+		t.Fatalf("cross-client disconnect must fail, got %+v", resp)
+	}
+	bridge.activePeersMu.RLock()
+	_, peerStillPresent := bridge.activePeers[peerHex]
+	bridge.activePeersMu.RUnlock()
+	if !peerStillPresent {
+		t.Fatal("unauthorized disconnect removed the owner's peer")
+	}
+
+	overlayID := make([]byte, 32)
+	overlayID[0] = 2
+	overlayHex := hex.EncodeToString(overlayID)
+	owner.peersMu.Lock()
+	owner.overlays = append(owner.overlays, overlayHex)
+	owner.peersMu.Unlock()
+	bridge.activePeersMu.RLock()
+	manager := bridge.peerWrappers[peerHex]
+	bridge.activePeersMu.RUnlock()
+	bridge.activeOverlaysMu.Lock()
+	bridge.activeOverlays[overlayHex] = manager.WithOverlay(overlayID)
+	bridge.activeOverlaysMu.Unlock()
+	bridge.overlayToPeerMu.Lock()
+	bridge.overlayToPeer[overlayHex] = peerHex
+	bridge.overlayToPeerMu.Unlock()
+
+	resp = rpc(t, strangerConn, "leave", "overlay.leave", map[string]string{
+		"overlay_id": base64.StdEncoding.EncodeToString(overlayID),
+	})
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "not owned") {
+		t.Fatalf("cross-client leave must fail, got %+v", resp)
+	}
+	bridge.activeOverlaysMu.RLock()
+	_, overlayStillPresent := bridge.activeOverlays[overlayHex]
+	bridge.activeOverlaysMu.RUnlock()
+	if !overlayStillPresent {
+		t.Fatal("unauthorized leave removed the owner's overlay")
+	}
+
+	otherOverlayID := make([]byte, 32)
+	otherOverlayID[0] = 3
+	resp = rpc(t, strangerConn, "join", "overlay.join", map[string]string{
+		"overlay_id": base64.StdEncoding.EncodeToString(otherOverlayID),
+		"peer_id":    base64.StdEncoding.EncodeToString(peerID),
+	})
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "peer not owned") {
+		t.Fatalf("cross-client join must fail, got %+v", resp)
+	}
+
+	resp = rpc(t, ownerConn, "handler", "overlay.setQueryHandler", map[string]string{
+		"overlay_id": base64.StdEncoding.EncodeToString(overlayID),
+		"peer_id":    base64.StdEncoding.EncodeToString(peerID),
+	})
+	if resp.Error != nil {
+		t.Fatalf("owner must be able to enable the overlay query handler: %+v", resp.Error)
+	}
+	if !bridge.peerLifecycleMu.TryLock() {
+		t.Fatal("overlay.setQueryHandler leaked the peer lifecycle mutex")
+	}
+	bridge.peerLifecycleMu.Unlock()
+
+	queryData, err := tl.Serialize(RawMessage{Data: []byte("query")}, true)
+	if err != nil {
+		t.Fatalf("serialize test query: %v", err)
+	}
+	resp = rpc(t, ownerConn, "query", "overlay.query", map[string]interface{}{
+		"overlay_id": base64.StdEncoding.EncodeToString(overlayID),
+		"data":       base64.StdEncoding.EncodeToString(queryData),
+		"timeout":    1,
+	})
+	if resp.Error != nil {
+		t.Fatalf("owner overlay query failed: %+v", resp.Error)
+	}
+	if !bridge.peerLifecycleMu.TryLock() {
+		t.Fatal("overlay.query leaked the peer lifecycle mutex")
+	}
+	bridge.peerLifecycleMu.Unlock()
+
+}
+
 func TestWSBridge_RapidSequentialRequests(t *testing.T) {
 	bridge := testBridge()
 	conn, cleanup := dialTestBridge(t, bridge)
@@ -383,6 +513,46 @@ func TestWSBridge_ErrorCode32602(t *testing.T) {
 		if resp.Error.Code != -32602 {
 			t.Errorf("%s: expected code -32602, got %d (%s)", tc.method, resp.Error.Code, resp.Error.Message)
 		}
+	}
+}
+
+// TestWSBridge_OverlayBroadcast_Validation exercises overlay.broadcast without a
+// live network: it must be a registered method (never -32601) and must reject bad
+// input with -32602 before touching the overlay/DHT layer.
+func TestWSBridge_OverlayBroadcast_Validation(t *testing.T) {
+	bridge := testBridge()
+	conn, cleanup := dialTestBridge(t, bridge)
+	defer cleanup()
+
+	validOverlay := base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	cases := []struct {
+		name       string
+		params     interface{}
+		wantSubstr string
+	}{
+		{"not_joined", map[string]string{"overlay_id": validOverlay, "data": "aGk="}, "overlay not found"},
+		{"empty_data", map[string]string{"overlay_id": validOverlay, "data": ""}, "data is empty"},
+		{"bad_overlay_b64", map[string]string{"overlay_id": "!!!notb64", "data": "aGk="}, "invalid base64 overlay_id"},
+		{"bad_data_b64", map[string]string{"overlay_id": validOverlay, "data": "!!!notb64"}, "invalid base64 data"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := rpc(t, conn, "1", "overlay.broadcast", tc.params)
+			if resp.Error == nil {
+				t.Fatalf("expected error, got result: %v", resp.Result)
+			}
+			if resp.Error.Code == -32601 {
+				t.Fatalf("overlay.broadcast is not registered (unknown method): %s", resp.Error.Message)
+			}
+			if resp.Error.Code != -32602 {
+				t.Fatalf("expected code -32602, got %d (%s)", resp.Error.Code, resp.Error.Message)
+			}
+			if !strings.Contains(resp.Error.Message, tc.wantSubstr) {
+				t.Fatalf("expected message to contain %q, got %q", tc.wantSubstr, resp.Error.Message)
+			}
+		})
 	}
 }
 

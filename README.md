@@ -72,7 +72,10 @@ The values below are defaults; every one is tunable via `config.json` (see [Conf
 
 ### SSRF Protection
 
-`adnl.connect` and `adnl.connectByADNL` reject private, loopback, and reserved IP addresses. Toggle with `namespaces.adnl.ssrf_protection` in `config.json` (on by default).
+`adnl.connect` rejects private, loopback, and reserved IP addresses when
+`namespaces.adnl.ssrf_protection` is enabled (the default).
+`adnl.connectByADNL` always enforces this check because DHT records are
+untrusted public-network discovery inputs.
 
 ## Configuration
 
@@ -100,7 +103,7 @@ Each namespace can be disabled (`enabled: false`) and given its own `timeout`. C
 
 > **Invariant:** keep `websocket.max_inflight > namespaces.subscribe.max_subscriptions`. Each active subscription holds one in-flight request slot for its whole lifetime, so if the two are equal a client that maxes out its subscriptions can no longer issue `subscribe.unsubscribe`. The bridge rejects configs that violate this at startup.
 
-## Methods (65)
+## Methods (66)
 
 ### Subscriptions - Real-Time Push (8)
 
@@ -122,7 +125,7 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | Method | Params | Response |
 |--------|--------|----------|
 | `adnl.connect` | `address` (ip:port), `key` (base64) | `{connected, peer_id, remote_addr}` |
-| `adnl.connectByADNL` | `adnl_id` (base64) | `{connected, peer_id, remote_addr}` |
+| `adnl.connectByADNL` | `adnl_id` (base64) | `{connected, peer_id, remote_addr}` after trying up to 8 public DHT addresses and a 3s liveness ping |
 | `adnl.sendMessage` | `peer_id`, `data` (base64) | `{sent}` |
 | `adnl.ping` | `peer_id` | `{latency_ms}` |
 | `adnl.disconnect` | `peer_id` | `{disconnected}` |
@@ -131,30 +134,38 @@ Max 50 per connection. All return `subscription_id` in the confirmation response
 | `adnl.setQueryHandler` | `peer_id` | `{enabled}` then push `adnl.queryReceived` events |
 | `adnl.answer` | `query_id` (hex), `data` (base64) | `{answered}` |
 
-### Overlay - Network Overlays (7)
+### Overlay - Network Overlays (8)
 
 | Method | Params | Response |
 |--------|--------|----------|
-| `overlay.join` | `overlay_id`, `peer_id` (base64) | `{joined, overlay_id}` |
+| `overlay.join` | `overlay_id`, `peer_id` (base64) | `{joined, overlay_id}` then push `overlay.broadcast` / `overlay.message` events |
 | `overlay.leave` | `overlay_id` | `{left}` |
 | `overlay.getPeers` | `overlay_id` | `{peers: [{id, overlay}]}` |
-| `overlay.sendMessage` | `overlay_id`, `data` (base64) | `{sent}` |
-| `overlay.query` | `overlay_id`, `data` (base64), `timeout` | `{data: "base64"}` |
+| `overlay.sendMessage` | `overlay_id`, `data` (base64) | `{sent}` — unicast to the joined peer |
+| `overlay.broadcast` | `overlay_id`, `data` (base64, ≤1 MiB) | `{broadcast_id}` — signed FEC fan-out to the whole overlay |
+| `overlay.query` | `overlay_id`, boxed TL `data` (base64, 1..8064 B), `timeout` | `{data: "base64"}` |
 | `overlay.setQueryHandler` | `overlay_id`, `peer_id` | `{enabled}` then push `overlay.queryReceived` events |
 | `overlay.answer` | `query_id` (hex), `data` (base64) | `{answered}` |
+
+Incoming overlay broadcasts are pushed to joined clients as `overlay.broadcast` events: `{overlay_id, message (base64 ws.rawMessage), trusted}`. A sender does not receive an echo of its own broadcast.
 
 ### DHT - Distributed Hash Table (6)
 
 | Method | Params | Response | Timeout |
 |--------|--------|----------|---------|
 | `dht.findAddresses` | `key` (base64, 32 bytes) | `{addresses: [{ip, port}], pubkey}` | 15s |
-| `dht.findOverlayNodes` | `overlay_key` (base64) | `{nodes: [{id, overlay, version}], count}` | 15s |
+| `dht.findOverlayNodes` | raw `overlay_key` (base64, 1..256 B) | `{nodes: [{id, adnl_id, overlay, version}], count}` | 15s |
 | `dht.findTunnelNodes` | | `{relays: [{adnl_id, version}], count}` | 30s |
 | `dht.findValue` | `key_id` (base64), `name`, `index` | `{data: "base64", ttl}` | 15s |
 | `dht.storeAddress` | `addresses[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key}` | 15s |
 | `dht.storeOverlayNodes` | `overlay_key`, `nodes[]`, `ttl?`, `replicas?` | `{stored, replicas, id_key}` | 15s |
 
 `dht.storeAddress` and `dht.storeOverlayNodes` are **disabled by default** (they publish records signed by the bridge's persistent ADNL key, which would let a client hijack the bridge identity in the DHT). When disabled, any call returns error -32603. Enable them by setting `namespaces.dht.allow_write: true` in `config.json`. The `replicas` param is accepted for wire compatibility but ignored (tonutils-go v1.17+ internalizes DHT replication).
+
+`dht.findOverlayNodes` delegates DHT value verification to tonutils-go and then
+filters the returned nodes again: ed25519 id, valid node signature, matching
+derived overlay id, at most 60 seconds in the future and at most 10 minutes old.
+`id` remains the legacy public-key field; `adnl_id` is the hash clients dial.
 
 ### Lite - Blockchain Queries (20)
 

@@ -4,15 +4,25 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: true
+
+      - name: Module integrity
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
 
       - name: Build
         run: go build ./...
@@ -21,7 +31,12 @@ jobs:
         run: go vet ./...
 
       - name: Unit tests
-        run: go test ./wsbridge/ -v -count=1
+        run: go test -race ./... -count=1
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck ./...
 
   build:
     needs: test
@@ -48,11 +63,12 @@ jobs:
             goarch: arm64
             suffix: android-arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: true
 
       - name: Build
         env:
@@ -61,7 +77,7 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -ldflags="-s -w" -o tonutils-bridge-${{ matrix.suffix }} .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tonutils-bridge-${{ matrix.suffix }}
           path: tonutils-bridge-${{ matrix.suffix }}
@@ -72,11 +88,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: artifacts/*

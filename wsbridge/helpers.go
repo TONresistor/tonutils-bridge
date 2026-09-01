@@ -16,29 +16,49 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
-// privateNets holds pre-parsed CIDR ranges for private/loopback/link-local IPs.
+// privateNets holds private and special-purpose ranges that must never be used
+// as untrusted ADNL connection targets.
 var privateNets []*net.IPNet
 
 func init() {
 	for _, cidr := range []string{
+		"0.0.0.0/8",
 		"127.0.0.0/8",
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"169.254.0.0/16",
-		"::1/128",
-		"fe80::/10",
-		"fc00::/7",
-		"0.0.0.0/8",
 		"100.64.0.0/10",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"192.88.99.0/24",
 		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
 		"224.0.0.0/4",
+		"240.0.0.0/4",
+		"::/128",
+		"::1/128",
+		"64:ff9b:1::/48",
+		"100::/64",
+		"100:0:0:1::/64",
+		"2001::/23",
+		"2001:db8::/32",
+		"2002::/16",
+		"3fff::/20",
+		"5f00::/16",
+		"fc00::/7",
+		"fe80::/10",
+		"ff00::/8",
 	} {
 		_, network, _ := net.ParseCIDR(cidr)
 		privateNets = append(privateNets, network)
 	}
 }
 
+func isPublicUnicastIP(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() && !isPrivateIP(ip)
+}
 
 // tunnelOverlayKeyHash computes SHA256(TL-serialize(adnlTunnel.overlayKey{paymentNode}))
 // without relying on the TL registry, avoiding conflicts between wsbridge.OverlayKey
@@ -104,11 +124,11 @@ func serializeStack(tuple []any) []any {
 // serializeTransaction converts a TLB Transaction into a JSON-serializable map.
 func serializeTransaction(tx *tlb.Transaction) map[string]any {
 	txMap := map[string]any{
-		"hash":        hex.EncodeToString(tx.Hash),
-		"lt":          fmt.Sprintf("%d", tx.LT),
-		"now":         tx.Now,
-		"total_fees":  tx.TotalFees.Coins.Nano().String(),
-		"prev_tx_lt":  fmt.Sprintf("%d", tx.PrevTxLT),
+		"hash":         hex.EncodeToString(tx.Hash),
+		"lt":           fmt.Sprintf("%d", tx.LT),
+		"now":          tx.Now,
+		"total_fees":   tx.TotalFees.Coins.Nano().String(),
+		"prev_tx_lt":   fmt.Sprintf("%d", tx.PrevTxLT),
 		"prev_tx_hash": hex.EncodeToString(tx.PrevTxHash),
 	}
 

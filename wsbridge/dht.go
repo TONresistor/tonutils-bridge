@@ -1,6 +1,7 @@
 package wsbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -12,7 +13,10 @@ import (
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
+	"github.com/xssnick/tonutils-go/tl"
 )
+
+const overlayNodeMaxAge = 10 * time.Minute
 
 func (b *WSBridge) handleFindAddresses(client *wsClient, req *WSRequest) {
 	var params struct {
@@ -75,8 +79,8 @@ func (b *WSBridge) handleFindOverlayNodes(client *wsClient, req *WSRequest) {
 		b.sendError(client, req.ID, "invalid base64 key: "+err.Error(), -32602)
 		return
 	}
-	if len(keyBytes) != 32 {
-		b.sendError(client, req.ID, "overlay_key must be 32 bytes", -32602)
+	if len(keyBytes) == 0 || len(keyBytes) > 256 {
+		b.sendError(client, req.ID, "overlay_key must be between 1 and 256 bytes", -32602)
 		return
 	}
 
@@ -91,18 +95,25 @@ func (b *WSBridge) handleFindOverlayNodes(client *wsClient, req *WSRequest) {
 
 	type overlayNodeInfo struct {
 		ID      string `json:"id"`
+		ADNLID  string `json:"adnl_id"`
 		Overlay string `json:"overlay"`
 		Version int32  `json:"version"`
 	}
 	var nodes []overlayNodeInfo
+	now := time.Now()
 	if nodesList != nil {
 		for _, node := range nodesList.List {
 			id, ok := node.ID.(keys.PublicKeyED25519)
-			if !ok {
+			if !ok || !validOverlayNode(node, keyBytes, now) {
+				continue
+			}
+			adnlID, err := tl.Hash(node.ID)
+			if err != nil {
 				continue
 			}
 			nodes = append(nodes, overlayNodeInfo{
 				ID:      base64.StdEncoding.EncodeToString(id.Key),
+				ADNLID:  base64.StdEncoding.EncodeToString(adnlID),
 				Overlay: base64.StdEncoding.EncodeToString(node.Overlay),
 				Version: node.Version,
 			})
@@ -116,6 +127,18 @@ func (b *WSBridge) handleFindOverlayNodes(client *wsClient, req *WSRequest) {
 		"nodes": nodes,
 		"count": len(nodes),
 	})
+}
+
+func validOverlayNode(node overlay.Node, overlayKey []byte, now time.Time) bool {
+	expected, err := tl.Hash(keys.PublicKeyOverlay{Key: overlayKey})
+	if err != nil || !bytes.Equal(node.Overlay, expected) {
+		return false
+	}
+	if err := node.CheckSignature(); err != nil {
+		return false
+	}
+	ts := int64(node.Version)
+	return ts <= now.Unix()+60 && now.Unix()-ts <= int64(overlayNodeMaxAge.Seconds())
 }
 
 func (b *WSBridge) handleFindTunnelNodes(client *wsClient, req *WSRequest) {
@@ -298,12 +321,12 @@ func (b *WSBridge) handleDHTStoreOverlayNodes(client *wsClient, req *WSRequest) 
 	var params struct {
 		OverlayKey string `json:"overlay_key"` // base64 32 bytes
 		Nodes      []struct {
-			ID        string `json:"id"`        // base64 ed25519 public key
-			Overlay   string `json:"overlay"`   // base64 overlay ID
+			ID        string `json:"id"`      // base64 ed25519 public key
+			Overlay   string `json:"overlay"` // base64 overlay ID
 			Version   int32  `json:"version"`
 			Signature string `json:"signature"` // base64 node signature
 		} `json:"nodes"`
-		TTL      int `json:"ttl"`      // seconds
+		TTL      int `json:"ttl"` // seconds
 		Replicas int `json:"replicas"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
